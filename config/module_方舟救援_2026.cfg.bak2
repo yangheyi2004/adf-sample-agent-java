@@ -1,0 +1,91 @@
+## Clustering配置
+Clustering.Ambulance = 方舟救援_2026.module.algorithm.AmbulanceClustering
+Clustering.Fire = 方舟救援_2026.module.algorithm.FireClustering
+Clustering.Police = 方舟救援_2026.module.algorithm.PoliceClustering
+
+## DefaultTacticsAmbulanceTeam
+DefaultTacticsAmbulanceTeam.HumanDetector : 方舟救援_2026.module.complex.HumanDetector
+DefaultTacticsAmbulanceTeam.Search : 方舟救援_2026.module.complex.MySearch
+DefaultTacticsAmbulanceTeam.ExtActionTransport : 方舟救援_2026.extraction.AmbulanceExtAction
+DefaultTacticsAmbulanceTeam.ExtActionMove : 方舟救援_2026.extraction.AmbulanceExtAction
+DefaultTacticsAmbulanceTeam.CommandExecutorAmbulance : 方舟救援_2026.centralized.AmbulanceCommandExecutor
+DefaultTacticsAmbulanceTeam.CommandExecutorScout : 方舟救援_2026.centralized.AmbulanceCommandExecutor
+
+## DefaultTacticsFireBrigade
+DefaultTacticsFireBrigade.HumanDetector : 方舟救援_2026.module.complex.HumanDetector
+DefaultTacticsFireBrigade.Search : 方舟救援_2026.module.complex.MySearch
+DefaultTacticsFireBrigade.ExtActionFireExtinguish : 方舟救援_2026.extraction.FireExtAction
+DefaultTacticsFireBrigade.ExtActionMove : 方舟救援_2026.extraction.FireExtAction
+DefaultTacticsFireBrigade.CommandExecutorFire : 方舟救援_2026.centralized.FireCommandExecutor
+DefaultTacticsFireBrigade.CommandExecutorScout : 方舟救援_2026.centralized.FireCommandExecutor
+
+## DefaultTacticsPoliceForce
+DefaultTacticsPoliceForce.RoadDetector : 方舟救援_2026.module.complex.RoadDetector
+DefaultTacticsPoliceForce.Search : 方舟救援_2026.module.complex.MySearch
+DefaultTacticsPoliceForce.ExtActionClear : 方舟救援_2026.extraction.PoliceExtAction
+DefaultTacticsPoliceForce.ExtActionMove : 方舟救援_2026.extraction.PoliceExtAction
+DefaultTacticsPoliceForce.CommandExecutorPolice : 方舟救援_2026.centralized.PoliceCommandExecutor
+DefaultTacticsPoliceForce.CommandExecutorScout : 方舟救援_2026.centralized.PoliceCommandExecutor
+
+## DefaultTacticsAmbulanceCentre
+DefaultTacticsAmbulanceCentre.TargetAllocator : 方舟救援_2026.module.complex.AmbulanceTargetAllocator
+DefaultTacticsAmbulanceCentre.CommandPicker : 方舟救援_2026.centralized.AmbulanceCommandPicker
+
+## DefaultTacticsFireStation
+DefaultTacticsFireStation.TargetAllocator : 方舟救援_2026.module.complex.FireTargetAllocator
+DefaultTacticsFireStation.CommandPicker : 方舟救援_2026.centralized.FireCommandPicker
+
+## DefaultTacticsPoliceOffice
+DefaultTacticsPoliceOffice.TargetAllocator : 方舟救援_2026.module.complex.PoliceTargetAllocator
+DefaultTacticsPoliceOffice.CommandPicker : 方舟救援_2026.centralized.PoliceCommandPicker
+
+## ExtAction - 警察
+DefaultExtActionClear.PathPlanning : 方舟救援_2026.module.algorithm.PolicePathPlanning
+DefaultExtActionClear.ExtActionMove : 方舟救援_2026.extraction.PoliceExtAction
+
+## ExtAction - 消防
+DefaultExtActionFireExtinguish.PathPlanning : 方舟救援_2026.module.algorithm.FirePathPlanning
+DefaultExtActionFireExtinguish.ExtActionMove : 方舟救援_2026.extraction.FireExtAction
+
+DefaultExtActionFireRescue.PathPlanning : 方舟救援_2026.module.algorithm.FirePathPlanning
+DefaultExtActionFireRescue.ExtActionMove : 方舟救援_2026.extraction.FireExtAction
+
+## ExtAction - 救护
+DefaultExtActionTransport.PathPlanning : 方舟救援_2026.module.algorithm.AmbulancePathPlanning
+DefaultExtActionTransport.ExtActionMove : 方舟救援_2026.extraction.AmbulanceExtAction
+
+DefaultExtActionMove.PathPlanning : 方舟救援_2026.module.algorithm.AmbulancePathPlanning
+
+## CommandExecutor - 救护
+DefaultCommandExecutorAmbulance.PathPlanning : 方舟救援_2026.module.algorithm.AmbulancePathPlanning
+DefaultCommandExecutorAmbulance.ExtActionTransport : 方舟救援_2026.extraction.AmbulanceExtAction
+DefaultCommandExecutorAmbulance.ExtActionMove : 方舟救援_2026.extraction.AmbulanceExtAction
+
+## CommandExecutor - 消防
+DefaultCommandExecutorFire.PathPlanning : 方舟救援_2026.module.algorithm.FirePathPlanning
+DefaultCommandExecutorFire.ExtActionFireExtinguish : 方舟救援_2026.extraction.FireExtAction
+DefaultCommandExecutorFire.ExtActionFireRescue : 方舟救援_2026.extraction.FireExtAction
+DefaultCommandExecutorFire.ExtActionMove : 方舟救援_2026.extraction.FireExtAction
+
+## CommandExecutor - 警察
+DefaultCommandExecutorPolice.PathPlanning : 方舟救援_2026.module.algorithm.PolicePathPlanning
+DefaultCommandExecutorPolice.ExtActionClear : 方舟救援_2026.extraction.PoliceExtAction
+DefaultCommandExecutorPolice.ExtActionMove : 方舟救援_2026.extraction.PoliceExtAction
+
+## CommandExecutor - 侦察 (使用警察的路径规划)
+DefaultCommandExecutorScout.PathPlanning : 方舟救援_2026.module.algorithm.PolicePathPlanning
+DefaultCommandExecutorScout.ExtActionMove : 方舟救援_2026.extraction.PoliceExtAction
+
+## CommandExecutorScoutPolice
+DefaultCommandExecutorScoutPolice.PathPlanning : 方舟救援_2026.module.algorithm.PolicePathPlanning
+DefaultCommandExecutorScoutPolice.ExtActionClear : 方舟救援_2026.extraction.PoliceExtAction
+
+## MessageManager - 通信模块
+MessageManager.PlatoonChannelSubscriber : 方舟救援_2026.communication.ChannelSubscriber
+MessageManager.CenterChannelSubscriber : 方舟救援_2026.communication.ChannelSubscriber
+MessageManager.PlatoonMessageCoordinator : 方舟救援_2026.communication.MessageCoordinator
+MessageManager.CenterMessageCoordinator : 方舟救援_2026.communication.MessageCoordinator
+
+## 调试配置
+VisualDebug : true
+
