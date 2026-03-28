@@ -1,20 +1,43 @@
 {
-  "ActionFireFighting.refill.completed": 10,
-  "ActionFireFighting.refill.request": 1,
+  "ActionExtMove.rest": 100,
   "ActionFireFighting.rest": 100,
   "ActionFireRescue.rest": 100,
+  "ActionFireFighting.refill.completed": 10,
+  "ActionFireFighting.refill.request": 1,
   "ActionExtClear.forcedMove": 3,
   "ActionExtClear.rest": 100,
-  "ActionTransport.rest": 100,
-  "ActionExtMove.rest": 100,
-  "SampleBuildingDetector.sendingAvoidTimeClearRequest": 5,
-  "SampleBuildingDetector.sendingAvoidTimeReceived": 3,
-  "SampleBuildingDetector.sendingAvoidTimeSent": 5,
-  "SampleBuildingDetector.moveDistance": 40000,
-  "SampleHumanDetector.sendingAvoidTimeClearRequest": 5,
-  "SampleHumanDetector.sendingAvoidTimeReceived": 3,
-  "SampleHumanDetector.sendingAvoidTimeSent": 5,
-  "SampleHumanDetector.moveDistance": 40000,
-  "CommandPickerAmbulance.scoutDistance": 40000,
-  "CommandPickerFire.scoutDistance": 40000
+  
+  "FireCommandExecutor.PathPlanning": "ZCWL_2026.module.algorithm.PathPlanning",
+  "FireCommandExecutor.ActionFireFighting": "ZCWL_2026.extraction.ActionFireFighting",
+  "FireCommandExecutor.ActionFireRescue": "ZCWL_2026.extraction.ActionFireRescue",
+  "FireCommandExecutor.ActionExtMove": "ZCWL_2026.extraction.ActionExtMove",
+  "FireCommandExecutor.HumanDetector": "ZCWL_2026.module.complex.HumanDetector",
+  "FireCommandExecutor.BuildingDetector": "ZCWL_2026.module.complex.BuildingDetector",
+  
+  "FireTargetAllocator.PathPlanning": "ZCWL_2026.module.algorithm.PathPlanning",
+  
+  "PoliceTargetAllocator.PathPlanning": "ZCWL_2026.module.algorithm.PathPlanning",
+  "PoliceCommandExecutor.PathPlanning": "ZCWL_2026.module.algorithm.PathPlanning",
+  "PoliceCommandExecutor.ActionExtClear": "ZCWL_2026.extraction.ActionExtClear",
+  "PoliceCommandExecutor.ActionExtMove": "ZCWL_2026.extraction.ActionExtMove",
+  
+  "AmbulanceCommandExecutor.PathPlanning": "ZCWL_2026.module.algorithm.PathPlanning",
+  "AmbulanceCommandExecutor.ActionTransport": "ZCWL_2026.extraction.ActionTransport",
+  "AmbulanceCommandExecutor.ActionExtMove": "ZCWL_2026.extraction.ActionExtMove",
+  
+  "MySearch.PathPlanning.Ambulance": "ZCWL_2026.module.algorithm.PathPlanning",
+  "MySearch.PathPlanning.Fire": "ZCWL_2026.module.algorithm.PathPlanning",
+  "MySearch.PathPlanning.Police": "ZCWL_2026.module.algorithm.PathPlanning",
+  
+  "RoadDetector.PathPlanning": "ZCWL_2026.module.algorithm.PathPlanning",
+  
+  "ScoutCommandExecutor.PathPlanning": "ZCWL_2026.module.algorithm.PathPlanning",
+  "ScoutPoliceCommandExecutor.PathPlanning": "ZCWL_2026.module.algorithm.PathPlanning",
+  "ScoutPoliceCommandExecutor.ActionExtClear": "ZCWL_2026.extraction.ActionExtClear",
+  
+  "ActionExtMove.PathPlanning": "ZCWL_2026.module.algorithm.PathPlanning",
+  "ActionTransport.PathPlanning": "ZCWL_2026.module.algorithm.PathPlanning",
+  "ActionFireFighting.PathPlanning": "ZCWL_2026.module.algorithm.PathPlanning",
+  "ActionFireRescue.PathPlanning": "ZCWL_2026.module.algorithm.PathPlanning",
+  "ActionExtClear.PathPlanning": "ZCWL_2026.module.algorithm.PathPlanning"
 }

@@ -90,7 +90,7 @@ public class TacticsFireBrigade extends adf.core.component.tactics.TacticsFireBr
                     "ZCWL_2026.extraction.FireExtAction");
                 this.actionExtMove = moduleManager.getExtAction(
                     "TacticsFireBrigade.ActionExtMove",
-                    "ZCWL_2026.extraction.FireExtAction");
+                    "ZCWL_2026.extraction.ActionExtMove");
                 this.commandExecutorFire = moduleManager.getCommandExecutor(
                     "TacticsFireBrigade.CommandExecutorFire",
                     "ZCWL_2026.centralized.FireCommandExecutor");

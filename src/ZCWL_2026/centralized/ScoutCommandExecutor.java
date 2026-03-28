@@ -4,7 +4,6 @@ import adf.core.component.communication.CommunicationMessage;
 import adf.core.agent.communication.standard.bundle.centralized.CommandScout;
 import adf.core.agent.action.common.ActionMove;
 import adf.core.agent.communication.MessageManager;
-import adf.core.agent.communication.standard.bundle.centralized.CommandScout;
 import adf.core.agent.communication.standard.bundle.centralized.MessageReport;
 import adf.core.agent.develop.DevelopData;
 import adf.core.agent.info.AgentInfo;
@@ -27,66 +26,65 @@ import java.util.stream.Collectors;
 import static rescuecore2.standard.entities.StandardEntityURN.REFUGE;
 
 public class ScoutCommandExecutor extends adf.core.component.centralized.CommandExecutor {
+
     private static final int ACTION_UNKNOWN = -1;
     private static final int ACTION_SCOUT = 1;
 
     private PathPlanning pathPlanning;
-
     private int type;
     private Collection<EntityID> scoutTargets;
     private EntityID commanderID;
 
-    public ScoutCommandExecutor(AgentInfo ai, WorldInfo wi, ScenarioInfo si, ModuleManager moduleManager, DevelopData developData) {
+    public ScoutCommandExecutor(AgentInfo ai, WorldInfo wi, ScenarioInfo si,
+                                 ModuleManager moduleManager, DevelopData developData) {
         super(ai, wi, si, moduleManager, developData);
         this.type = ACTION_UNKNOWN;
-        switch  (scenarioInfo.getMode()) {
+
+        switch (scenarioInfo.getMode()) {
             case PRECOMPUTATION_PHASE:
-                this.pathPlanning = moduleManager.getModule("ScoutCommandExecutor.PathPlanning", "ZCWL_2026.module.algorithm.ScoutPathPlanning");
-                break;
             case PRECOMPUTED:
-                this.pathPlanning = moduleManager.getModule("ScoutCommandExecutor.PathPlanning", "ZCWL_2026.module.algorithm.ScoutPathPlanning");
-                break;
             case NON_PRECOMPUTE:
-                this.pathPlanning = moduleManager.getModule("ScoutCommandExecutor.PathPlanning", "ZCWL_2026.module.algorithm.ScoutPathPlanning");
+                this.pathPlanning = moduleManager.getModule(
+                    "ScoutCommandExecutor.PathPlanning",
+                    "ZCWL_2026.module.algorithm.PathPlanning");
                 break;
         }
     }
 
     @Override
-public CommandExecutor setCommand(CommunicationMessage command) {
-    if (command instanceof CommandScout) {
-        CommandScout cmd = (CommandScout) command;
-        EntityID agentID = this.agentInfo.getID();
-        if(cmd.isToIDDefined() && (Objects.requireNonNull(cmd.getToID()).getValue() == agentID.getValue())) {
-            EntityID target = cmd.getTargetID();
-            if(target == null) {
-                target = this.agentInfo.getPosition();
-            }
-            this.type = ACTION_SCOUT;
-            this.commanderID = cmd.getSenderID();
-            this.scoutTargets = new HashSet<>();
-            this.scoutTargets.addAll(
+    public CommandExecutor setCommand(CommunicationMessage command) {
+        if (command instanceof CommandScout) {
+            CommandScout cmd = (CommandScout) command;
+            EntityID agentID = this.agentInfo.getID();
+            if (cmd.isToIDDefined() && (Objects.requireNonNull(cmd.getToID()).getValue() == agentID.getValue())) {
+                EntityID target = cmd.getTargetID();
+                if (target == null) {
+                    target = this.agentInfo.getPosition();
+                }
+                this.type = ACTION_SCOUT;
+                this.commanderID = cmd.getSenderID();
+                this.scoutTargets = new HashSet<>();
+                this.scoutTargets.addAll(
                     worldInfo.getObjectsInRange(target, cmd.getRange())
-                            .stream()
-                            .filter(e -> e instanceof Area && e.getStandardURN() != REFUGE)
-                            .map(AbstractEntity::getID)
-                            .collect(Collectors.toList())
-            );
+                        .stream()
+                        .filter(e -> e instanceof Area && e.getStandardURN() != REFUGE)
+                        .map(AbstractEntity::getID)
+                        .collect(Collectors.toList())
+                );
+            }
         }
+        return this;
     }
-    return this;
-}
 
     @Override
-    public CommandExecutor updateInfo(MessageManager messageManager){
+    public CommandExecutor updateInfo(MessageManager messageManager) {
         super.updateInfo(messageManager);
-        if(this.getCountUpdateInfo() >= 2) {
-            return this;
-        }
+        if (this.getCountUpdateInfo() >= 2) return this;
+        
         this.pathPlanning.updateInfo(messageManager);
 
-        if(this.isCommandCompleted()) {
-            if(this.type != ACTION_UNKNOWN) {
+        if (this.isCommandCompleted()) {
+            if (this.type != ACTION_UNKNOWN) {
                 messageManager.addMessage(new MessageReport(true, true, false, this.commanderID));
                 this.type = ACTION_UNKNOWN;
                 this.scoutTargets = null;
@@ -99,9 +97,7 @@ public CommandExecutor setCommand(CommunicationMessage command) {
     @Override
     public CommandExecutor precompute(PrecomputeData precomputeData) {
         super.precompute(precomputeData);
-        if(this.getCountPrecompute() >= 2) {
-            return this;
-        }
+        if (this.getCountPrecompute() >= 2) return this;
         this.pathPlanning.precompute(precomputeData);
         return this;
     }
@@ -109,9 +105,7 @@ public CommandExecutor setCommand(CommunicationMessage command) {
     @Override
     public CommandExecutor resume(PrecomputeData precomputeData) {
         super.resume(precomputeData);
-        if(this.getCountResume() >= 2) {
-            return this;
-        }
+        if (this.getCountResume() >= 2) return this;
         this.pathPlanning.resume(precomputeData);
         return this;
     }
@@ -119,9 +113,7 @@ public CommandExecutor setCommand(CommunicationMessage command) {
     @Override
     public CommandExecutor preparate() {
         super.preparate();
-        if(this.getCountPreparate() >= 2) {
-            return this;
-        }
+        if (this.getCountPreparate() >= 2) return this;
         this.pathPlanning.preparate();
         return this;
     }
@@ -129,14 +121,14 @@ public CommandExecutor setCommand(CommunicationMessage command) {
     @Override
     public CommandExecutor calc() {
         this.result = null;
-        if(this.type == ACTION_SCOUT) {
-            if(this.scoutTargets == null || this.scoutTargets.isEmpty()) {
+        if (this.type == ACTION_SCOUT) {
+            if (this.scoutTargets == null || this.scoutTargets.isEmpty()) {
                 return this;
             }
             this.pathPlanning.setFrom(this.agentInfo.getPosition());
             this.pathPlanning.setDestination(this.scoutTargets);
             List<EntityID> path = this.pathPlanning.calc().getResult();
-            if(path != null) {
+            if (path != null) {
                 this.result = new ActionMove(path);
             }
         }
@@ -144,8 +136,8 @@ public CommandExecutor setCommand(CommunicationMessage command) {
     }
 
     private boolean isCommandCompleted() {
-        if(this.type ==  ACTION_SCOUT) {
-            if(this.scoutTargets != null) {
+        if (this.type == ACTION_SCOUT) {
+            if (this.scoutTargets != null) {
                 this.scoutTargets.removeAll(this.worldInfo.getChanged().getChangedEntities());
             }
             return (this.scoutTargets == null || this.scoutTargets.isEmpty());
