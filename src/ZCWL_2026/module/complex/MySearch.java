@@ -17,7 +17,6 @@ import rescuecore2.standard.entities.*;
 import rescuecore2.worldmodel.EntityID;
 
 import java.util.*;
-
 import static rescuecore2.standard.entities.StandardEntityURN.*;
 
 public class MySearch extends Search {
@@ -30,8 +29,11 @@ public class MySearch extends Search {
     
     // 救护车专用
     private Set<EntityID> checkedBuildingsForVictims;
-    private EntityID pendingVictim;      // 待处理的受伤平民
-    private Set<EntityID> discoveredWaitingVictims;  // 已发现的等待装载平民（避免重复日志）
+    private EntityID pendingVictim;
+    private Set<EntityID> discoveredWaitingVictims;
+
+    // 本簇缓存
+    private Collection<EntityID> myClusterBuildings;
 
     public MySearch(AgentInfo ai, WorldInfo wi, ScenarioInfo si,
                     ModuleManager moduleManager, DevelopData developData) {
@@ -43,6 +45,7 @@ public class MySearch extends Search {
         this.discoveredWaitingVictims = new HashSet<>();
         this.agentType = ai.me().getStandardURN();
         this.pendingVictim = null;
+        this.myClusterBuildings = new ArrayList<>();
 
         StandardEntityURN agentURN = ai.me().getStandardURN();
         switch (si.getMode()) {
@@ -78,25 +81,26 @@ public class MySearch extends Search {
         super.updateInfo(messageManager);
         if (this.getCountUpdateInfo() >= 2) return this;
 
-        this.unsearchedBuildingIDs.removeAll(this.searchedBuildings);
-        this.unsearchedBuildingIDs.removeAll(this.worldInfo.getChanged().getChangedEntities());
-
+        // 从消息中同步已探索建筑
         for (CommunicationMessage message : messageManager.getReceivedMessageList(MessageBuilding.class)) {
             MessageBuilding mb = (MessageBuilding) message;
             this.searchedBuildings.add(mb.getBuildingID());
             this.unsearchedBuildingIDs.remove(mb.getBuildingID());
         }
 
+        // 移除已探索建筑
+        this.unsearchedBuildingIDs.removeAll(this.searchedBuildings);
+        this.unsearchedBuildingIDs.removeAll(this.worldInfo.getChanged().getChangedEntities());
+
         if (this.unsearchedBuildingIDs.isEmpty()) {
             this.reset();
             this.unsearchedBuildingIDs.removeAll(this.searchedBuildings);
         }
         
-        // ========== 救护车专用：接收紧急装载请求 ==========
+        // 救护车专用：接收紧急装载请求
         if (this.agentType == AMBULANCE_TEAM) {
             for (CommunicationMessage message : messageManager.getReceivedMessageList(MessageCivilian.class)) {
                 MessageCivilian mc = (MessageCivilian) message;
-                // 受伤且未被掩埋的平民（紧急装载请求）
                 if (mc.isDamageDefined() && mc.getDamage() > 0 && 
                     (!mc.isBuriednessDefined() || mc.getBuriedness() == 0)) {
                     this.pendingVictim = mc.getAgentID();
@@ -112,26 +116,20 @@ public class MySearch extends Search {
     }
 
     /**
-     * 方案2：检查当前位置附近是否有等待装载的平民（救护车专用）
-     * 包括：在道路上、未被掩埋、受伤的平民
+     * 检查当前位置附近是否有等待装载的平民（救护车专用）
      */
     private EntityID checkNearbyWaitingVictim(EntityID position) {
         if (this.agentType != AMBULANCE_TEAM) return null;
         
-        // 获取当前位置附近1000范围内的所有实体
         Collection<StandardEntity> entitiesInRange = this.worldInfo.getObjectsInRange(position, 1000);
-        
         EntityID nearest = null;
         double minDist = Double.MAX_VALUE;
         
         for (StandardEntity e : entitiesInRange) {
             if (e instanceof Civilian) {
                 Civilian civilian = (Civilian) e;
-                // 平民在道路上、未被掩埋、受伤 > 0
                 if (civilian.isPositionDefined() && civilian.isDamageDefined() && civilian.getDamage() > 0 &&
                     (!civilian.isBuriednessDefined() || civilian.getBuriedness() == 0)) {
-                    
-                    // 检查平民是否在道路上
                     StandardEntity posEntity = this.worldInfo.getEntity(civilian.getPosition());
                     if (posEntity instanceof Road) {
                         double dist = this.worldInfo.getDistance(position, civilian.getPosition());
@@ -139,11 +137,9 @@ public class MySearch extends Search {
                             minDist = dist;
                             nearest = civilian.getID();
                         }
-                        
-                        // 打印日志，方便调试
                         if (!discoveredWaitingVictims.contains(civilian.getID())) {
                             System.err.println("╔══════════════════════════════════════════════════════════════╗");
-                            System.err.println("║  [救护车搜索-方案2] 🚑 发现道路上等待装载的平民！            ║");
+                            System.err.println("║  [救护车搜索] 🚑 发现道路上等待装载的平民！                  ║");
                             System.err.println("║  平民 ID: " + civilian.getID() + " 伤害=" + civilian.getDamage());
                             System.err.println("║  位置: " + civilian.getPosition() + " (道路)");
                             System.err.println("╚══════════════════════════════════════════════════════════════╝");
@@ -160,28 +156,23 @@ public class MySearch extends Search {
     public Search calc() {
         this.result = null;
         
-        // ========== 方案2：救护车优先处理道路上等待装载的平民 ==========
+        // 救护车优先处理紧急装载
         if (this.agentType == AMBULANCE_TEAM) {
-            // 1. 先检查当前道路上是否有等待装载的平民
             EntityID waitingVictim = checkNearbyWaitingVictim(this.agentInfo.getPosition());
             if (waitingVictim != null) {
                 this.pendingVictim = waitingVictim;
-                this.result = waitingVictim;  // 直接返回平民ID
-                System.err.println("[救护车搜索-方案2] 🚑 发现道路上等待装载的平民，直接返回ID: " + waitingVictim);
+                this.result = waitingVictim;
+                System.err.println("[救护车搜索] 🚑 发现道路上等待装载的平民，直接返回ID: " + waitingVictim);
                 return this;
             }
-            
-            // 2. 检查已有的紧急任务（来自消息）
             if (this.pendingVictim != null) {
                 Human victim = (Human) this.worldInfo.getEntity(this.pendingVictim);
                 if (victim != null && victim.isHPDefined() && victim.getHP() > 0 &&
                     victim.isDamageDefined() && victim.getDamage() > 0 &&
                     (!victim.isBuriednessDefined() || victim.getBuriedness() == 0)) {
-                    
                     if (victim.isPositionDefined()) {
-                        // 返回平民位置，让执行器去移动
                         this.result = victim.getPosition();
-                        System.err.println("[救护车搜索-方案2] 🚑 紧急装载任务优先，前往位置: " + this.result + " (平民ID: " + this.pendingVictim + ")");
+                        System.err.println("[救护车搜索] 🚑 紧急装载任务优先，前往位置: " + this.result + " (平民ID: " + this.pendingVictim + ")");
                         return this;
                     }
                 }
@@ -189,21 +180,27 @@ public class MySearch extends Search {
             }
         }
         
-        // 如果有当前目标建筑且可达，直接返回
+        // 如果当前目标已被探索，放弃
+        if (this.result != null && this.searchedBuildings.contains(this.result)) {
+            System.err.println("[MySearch] 当前目标 " + this.result + " 已被其他智能体探索，重新选择");
+            this.result = null;
+        }
+        
+        // 已有目标且可达，直接返回
         if (this.result != null && isReachable(this.result)) {
             return this;
         }
         
-        // 找到最近的未探索建筑
+        // 寻找最近的未探索建筑（优先本簇）
         this.result = findNearestReachableBuilding();
         
-        // ========== 救护车专用：在找到建筑后，检查该建筑内是否有受伤平民 ==========
+        // 救护车专用：检查建筑内受伤平民
         if (this.agentType == AMBULANCE_TEAM && this.result != null) {
             EntityID victimInBuilding = checkBuildingForInjured(this.result);
             if (victimInBuilding != null) {
                 this.pendingVictim = victimInBuilding;
                 this.result = null;
-                System.err.println("[救护车搜索-方案2] 🚑 在建筑内发现受伤平民: " + victimInBuilding);
+                System.err.println("[救护车搜索] 🚑 在建筑内发现受伤平民: " + victimInBuilding);
                 return this;
             }
         }
@@ -213,7 +210,7 @@ public class MySearch extends Search {
             if (agentType == FIRE_BRIGADE) agentName = "消防车";
             else if (agentType == AMBULANCE_TEAM) agentName = "救护车";
             else if (agentType == POLICE_FORCE) agentName = "警车";
-            System.err.println("[ZCWL_2026] " + agentName + " ID:" + this.agentInfo.getID() + 
+            System.err.println("[MySearch] " + agentName + " ID:" + this.agentInfo.getID() + 
                                " 搜索到未探索建筑: " + this.result);
         }
         
@@ -224,70 +221,77 @@ public class MySearch extends Search {
      * 检查建筑内是否有受伤平民（救护车专用）
      */
     private EntityID checkBuildingForInjured(EntityID buildingId) {
-        if (this.agentType != AMBULANCE_TEAM) {
-            return null;
-        }
-        
-        if (checkedBuildingsForVictims.contains(buildingId)) {
-            return null;
-        }
+        if (this.agentType != AMBULANCE_TEAM) return null;
+        if (checkedBuildingsForVictims.contains(buildingId)) return null;
         
         StandardEntity entity = this.worldInfo.getEntity(buildingId);
-        if (!(entity instanceof Building)) {
-            return null;
-        }
+        if (!(entity instanceof Building)) return null;
         
         Collection<StandardEntity> entitiesInRange = this.worldInfo.getObjectsInRange(buildingId, 1000);
-        
         for (StandardEntity e : entitiesInRange) {
             if (e instanceof Civilian) {
                 Civilian civilian = (Civilian) e;
-                if (civilian.isPositionDefined() && civilian.getPosition().equals(buildingId)) {
-                    // 受伤但未被掩埋的平民
-                    if (civilian.isDamageDefined() && civilian.getDamage() > 0 &&
-                        (!civilian.isBuriednessDefined() || civilian.getBuriedness() == 0)) {
-                        
-                        System.err.println("╔══════════════════════════════════════════════════════════════╗");
-                        System.err.println("║  [救护车搜索] 🚑 在建筑 " + buildingId + " 内发现受伤平民！    ║");
-                        System.err.println("║  平民 ID: " + civilian.getID() + " 伤害=" + civilian.getDamage() + "      ║");
-                        System.err.println("╚══════════════════════════════════════════════════════════════╝");
-                        
-                        checkedBuildingsForVictims.add(buildingId);
-                        return civilian.getID();
-                    }
+                if (civilian.isPositionDefined() && civilian.getPosition().equals(buildingId) &&
+                    civilian.isDamageDefined() && civilian.getDamage() > 0 &&
+                    (!civilian.isBuriednessDefined() || civilian.getBuriedness() == 0)) {
+                    System.err.println("╔══════════════════════════════════════════════════════════════╗");
+                    System.err.println("║  [救护车搜索] 🚑 在建筑 " + buildingId + " 内发现受伤平民！    ║");
+                    System.err.println("║  平民 ID: " + civilian.getID() + " 伤害=" + civilian.getDamage() + "      ║");
+                    System.err.println("╚══════════════════════════════════════════════════════════════╝");
+                    checkedBuildingsForVictims.add(buildingId);
+                    return civilian.getID();
                 }
             }
         }
-        
         checkedBuildingsForVictims.add(buildingId);
         return null;
     }
 
     @Override
     public EntityID getTarget() {
-        // 救护车：优先返回受伤平民
         if (this.agentType == AMBULANCE_TEAM && this.pendingVictim != null) {
             return this.pendingVictim;
         }
         return this.result;
     }
 
+    /**
+     * 寻找最近的未探索建筑（优先本簇内，若本簇无则全图）
+     */
     private EntityID findNearestReachableBuilding() {
         EntityID currentPos = this.agentInfo.getPosition();
-        EntityID nearest = null;
-        int minDistance = Integer.MAX_VALUE;
+        EntityID best = null;
+        int bestDist = Integer.MAX_VALUE;
         
-        for (EntityID buildingId : this.unsearchedBuildingIDs) {
-            if (isReachable(buildingId)) {
-                List<EntityID> path = this.pathPlanning.getResult(currentPos, buildingId);
-                if (path != null && path.size() < minDistance) {
-                    minDistance = path.size();
-                    nearest = buildingId;
+        // 1. 优先在本簇内寻找
+        Set<EntityID> candidates = new HashSet<>();
+        if (this.myClusterBuildings != null && !this.myClusterBuildings.isEmpty()) {
+            // 只从本簇内筛选未探索且可达的建筑
+            for (EntityID b : this.myClusterBuildings) {
+                if (!this.searchedBuildings.contains(b) && this.unsearchedBuildingIDs.contains(b)) {
+                    candidates.add(b);
                 }
             }
         }
         
-        return nearest;
+        // 2. 如果本簇内没有，则从全部未探索建筑中寻找
+        if (candidates.isEmpty()) {
+            candidates = new HashSet<>(this.unsearchedBuildingIDs);
+            candidates.removeAll(this.searchedBuildings);
+        }
+        
+        // 3. 按距离排序（通过路径长度）
+        for (EntityID buildingId : candidates) {
+            if (this.searchedBuildings.contains(buildingId)) continue; // 再次确认
+            if (!isReachable(buildingId)) continue;
+            List<EntityID> path = this.pathPlanning.getResult(currentPos, buildingId);
+            if (path != null && path.size() < bestDist) {
+                bestDist = path.size();
+                best = buildingId;
+            }
+        }
+        
+        return best;
     }
 
     private boolean isReachable(EntityID target) {
@@ -298,22 +302,26 @@ public class MySearch extends Search {
 
     private void reset() {
         this.unsearchedBuildingIDs.clear();
-
-        Collection<StandardEntity> clusterEntities = null;
+        
+        // 获取本簇建筑列表
         if (this.clustering != null) {
             int clusterIndex = this.clustering.getClusterIndex(this.agentInfo.getID());
-            clusterEntities = this.clustering.getClusterEntities(clusterIndex);
-        }
-        
-        if (clusterEntities != null && clusterEntities.size() > 0) {
-            for (StandardEntity entity : clusterEntities) {
-                if (entity instanceof Building && entity.getStandardURN() != REFUGE) {
-                    if (!this.searchedBuildings.contains(entity.getID())) {
-                        this.unsearchedBuildingIDs.add(entity.getID());
+            Collection<StandardEntity> clusterEntities = this.clustering.getClusterEntities(clusterIndex);
+            if (clusterEntities != null && !clusterEntities.isEmpty()) {
+                this.myClusterBuildings = new ArrayList<>();
+                for (StandardEntity entity : clusterEntities) {
+                    if (entity instanceof Building && entity.getStandardURN() != REFUGE) {
+                        this.myClusterBuildings.add(entity.getID());
+                        if (!this.searchedBuildings.contains(entity.getID())) {
+                            this.unsearchedBuildingIDs.add(entity.getID());
+                        }
                     }
                 }
             }
-        } else {
+        }
+        
+        // 如果没有聚类或聚类为空，则添加全图建筑
+        if (this.myClusterBuildings == null || this.myClusterBuildings.isEmpty()) {
             for (StandardEntity entity : this.worldInfo.getEntitiesOfType(BUILDING, GAS_STATION, AMBULANCE_CENTRE, FIRE_STATION, POLICE_OFFICE)) {
                 if (!this.searchedBuildings.contains(entity.getID())) {
                     this.unsearchedBuildingIDs.add(entity.getID());
@@ -321,6 +329,7 @@ public class MySearch extends Search {
             }
         }
         
+        // 清理救护车专用缓存
         if (this.agentType == AMBULANCE_TEAM) {
             this.checkedBuildingsForVictims.clear();
             this.discoveredWaitingVictims.clear();
@@ -330,8 +339,10 @@ public class MySearch extends Search {
         if (agentType == FIRE_BRIGADE) agentName = "消防车";
         else if (agentType == AMBULANCE_TEAM) agentName = "救护车";
         else if (agentType == POLICE_FORCE) agentName = "警车";
-        System.err.println("[ZCWL_2026] " + agentName + " ID:" + this.agentInfo.getID() + 
-                           " 重置搜索列表，剩余未探索建筑: " + this.unsearchedBuildingIDs.size());
+        System.err.println("[MySearch] " + agentName + " ID:" + this.agentInfo.getID() + 
+                           " 重置搜索列表，本簇建筑数=" + 
+                           (this.myClusterBuildings == null ? 0 : this.myClusterBuildings.size()) +
+                           ", 总未探索数=" + this.unsearchedBuildingIDs.size());
     }
 
     @Override

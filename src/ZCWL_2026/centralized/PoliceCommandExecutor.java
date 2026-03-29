@@ -212,7 +212,7 @@ public class PoliceCommandExecutor extends adf.core.component.centralized.Comman
 
         switch (this.commandType) {
             case ACTION_REST:
-                System.err.println("[警车执行器] ACTION_REST -> 转为自主模式");
+                //System.err.println("[警车执行器] ACTION_REST -> 转为自主模式");
                 this.commandType = ACTION_AUTONOMY;
                 this.result = handleAutonomy();
                 return this;
@@ -232,7 +232,7 @@ public class PoliceCommandExecutor extends adf.core.component.centralized.Comman
                 return this;
 
             case ACTION_AUTONOMY:
-                System.err.println("[警车执行器] ACTION_AUTONOMY -> 自主模式");
+                //System.err.println("[警车执行器] ACTION_AUTONOMY -> 自主模式");
                 this.result = handleAutonomy();
                 return this;
 
@@ -279,7 +279,7 @@ private Action handleAutonomy() {
     EntityID bestRoad = findBestTrappedPath(position);
     if (bestRoad != null) {
         this.target = bestRoad;
-        System.err.println("[警车执行器] 找到被困人员通道: " + bestRoad + "，准备清理");
+       // System.err.println("[警车执行器] 找到被困人员通道: " + bestRoad + "，准备清理");
         return this.actionExtClear.setTarget(this.target).calc().getAction();
     }
 
@@ -287,7 +287,7 @@ private Action handleAutonomy() {
     bestRoad = findNearestRoadToClearGlobal(position);
     if (bestRoad != null) {
         this.target = bestRoad;
-        System.err.println("[警车执行器] 找到全局最近障碍物: " + bestRoad + "，准备清理");
+        //System.err.println("[警车执行器] 找到全局最近障碍物: " + bestRoad + "，准备清理");
         return this.actionExtClear.setTarget(this.target).calc().getAction();
     }
 

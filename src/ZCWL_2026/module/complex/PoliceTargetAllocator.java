@@ -389,13 +389,13 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
                 for (EntityID neighbourId : building.getNeighbours()) {
                     StandardEntity neighbour = this.worldInfo.getEntity(neighbourId);
                     if (neighbour instanceof Road && !ignoredTasks.contains(neighbourId) && !helpRequestTasks.contains(neighbourId)) {
-                        System.err.println("[警察分配器] 🆘 收到" + type + "被困消息，需要清理道路: " + neighbourId);
+                        //System.err.println("[警察分配器] 🆘 收到" + type + "被困消息，需要清理道路: " + neighbourId);
                         helpRequestTasks.add(neighbourId);
                         addTask(neighbourId, PRIORITY_HELP_REQUEST);
                     }
                 }
             } else if (positionEntity instanceof Road && !ignoredTasks.contains(trappedPosition) && !helpRequestTasks.contains(trappedPosition)) {
-                System.err.println("[警察分配器] 🆘 收到" + type + "被困消息，需要清理道路: " + trappedPosition);
+                //System.err.println("[警察分配器] 🆘 收到" + type + "被困消息，需要清理道路: " + trappedPosition);
                 helpRequestTasks.add(trappedPosition);
                 addTask(trappedPosition, PRIORITY_HELP_REQUEST);
             }
@@ -508,7 +508,7 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
             }
         }
         taskQueue.offer(new Task(target, priority, this.agentInfo.getTime()));
-        System.err.println("[警察分配器] 📋 添加任务: " + target + " 优先级=" + priority);
+        //System.err.println("[警察分配器] 📋 添加任务: " + target + " 优先级=" + priority);
     }
 
     private void updateTaskQueue() {
@@ -647,9 +647,9 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         
         System.err.println("[警察分配器] 开始分配任务，待分配任务数: " + tasks.size());
         for (Task task : tasks) {
-            String priorityName = getPriorityName(task.priority);
+           /*  String priorityName = getPriorityName(task.priority);
             System.err.println("[警察分配器]   任务: " + task.target + 
-                               ", 优先级=" + task.priority + "(" + priorityName + ")");
+                               ", 优先级=" + task.priority + "(" + priorityName + ")");*/
         }
         
         Set<EntityID> assignedTasks = new HashSet<>();
