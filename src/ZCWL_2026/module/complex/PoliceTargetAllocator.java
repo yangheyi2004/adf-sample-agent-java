@@ -22,14 +22,12 @@ import static rescuecore2.standard.entities.StandardEntityURN.*;
 
 public class PoliceTargetAllocator extends adf.core.component.module.complex.PoliceTargetAllocator {
 
-    // ==================== 优先级常量（重新定义，帮助任务高优先级）====================
+    // ==================== 优先级常量 ====================
     private static final int PRIORITY_HELP_REQUEST = 1;      // 帮助请求（消防员/救护车/被困人员）
-    private static final int PRIORITY_REFUGE_PATH = 0;       // 避难所通道 --最高优先级
+    private static final int PRIORITY_REFUGE_PATH = 0;       // 避难所通道 -- 最高优先级
     private static final int PRIORITY_FIRE_PATH = 2;         // 消防通道
-    private static final int PRIORITY_BUILDING_PATH = 3;     // 建筑周边道路
-    private static final int PRIORITY_NEAREST = 4;           // 由近及远（最低优先级）
 
-    private static final int MAX_POLICE_PER_TASK = 2;
+    private static final int MAX_POLICE_PER_TASK = 1;
     private static final int TASK_EXPIRE_TIME = 30;
 
     // ==================== 数据结构 ====================
@@ -42,7 +40,6 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
     private Set<EntityID> helpRequestTasks;      // 帮助请求（消防员/救护车/被困人员）
     private Set<EntityID> refugePaths;           // 避难所通道
     private Set<EntityID> firePaths;             // 消防通道
-    private Set<EntityID> buildingRoads;         // 普通建筑周边道路
     
     // 任务完成跟踪
     private Set<EntityID> completedTasks;
@@ -64,7 +61,6 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         this.helpRequestTasks = new HashSet<>();
         this.refugePaths = new HashSet<>();
         this.firePaths = new HashSet<>();
-        this.buildingRoads = new HashSet<>();
         
         this.completedTasks = new HashSet<>();
         this.ignoredTasks = new HashSet<>();
@@ -84,12 +80,6 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         if (this.pathPlanning != null) {
             registerModule(this.pathPlanning);
         }
-        
-        System.err.println("╔══════════════════════════════════════════════════════════════╗");
-        System.err.println("║  [ZCWL_2026] 警察分配器已加载                                 ║");
-        System.err.println("║  优先级: 帮助请求(0) > 避难所(1) > 消防通道(2) > 建筑(3)     ║");
-        System.err.println("║  策略: 空闲 > 打断低优先级任务 > 距离优先                     ║");
-        System.err.println("╚══════════════════════════════════════════════════════════════╝");
     }
 
     @Override
@@ -154,11 +144,7 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         for (StandardEntity e : this.worldInfo.getEntitiesOfType(FIRE_STATION)) {
             addNeighbourRoads(e, firePaths);
         }
-        // 普通建筑周边道路
-        for (StandardEntity e : this.worldInfo.getEntitiesOfType(BUILDING, GAS_STATION,
-                AMBULANCE_CENTRE, POLICE_OFFICE)) {
-            addNeighbourRoads(e, buildingRoads);
-        }
+        // 不再添加普通建筑周边道路，由警察自主模式处理
     }
 
     private void addNeighbourRoads(StandardEntity building, Set<EntityID> roadSet) {
@@ -309,36 +295,29 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
     }
 
     private void processMessages(MessageManager messageManager) {
-    for (CommunicationMessage message : messageManager.getReceivedMessageList()) {
-        // 消防员开路请求
-        handleFiremanMessage(message);
-        // 救护车开路请求
-        handleAmbulanceMessage(message);
-        // 被困人员开路请求
-        handleTrappedMessage(message);
-        // 其他消息
-        handleFireMessage(message);
-        handlePoliceMessage(message);
-        handleReportMessage(message);
+        for (CommunicationMessage message : messageManager.getReceivedMessageList()) {
+            // 消防员开路请求
+            handleFiremanMessage(message);
+            // 救护车开路请求
+            handleAmbulanceMessage(message);
+            // 被困人员开路请求
+            handleTrappedMessage(message);
+            // 其他消息
+            handleFireMessage(message);
+            handlePoliceMessage(message);
+            handleReportMessage(message);
+        }
     }
-}
 
     /**
-     * 处理消防员消息 - 统一添加到帮助请求任务
+     * 处理消防员消息 - 统一添加到帮助请求任务（去重）
      */
     private void handleFiremanMessage(CommunicationMessage message) {
         if (message instanceof MessageFireBrigade) {
             MessageFireBrigade mfb = (MessageFireBrigade) message;
             EntityID target = mfb.getTargetID();
             
-            System.err.println("╔══════════════════════════════════════════════════════════════╗");
-            System.err.println("║  [警察分配器] 🚨 收到消防员开路请求！                         ║");
-            System.err.println("║  消防员 ID: " + mfb.getAgentID());
-            System.err.println("║  需要清理的道路: " + target);
-            System.err.println("║  优先级: " + PRIORITY_HELP_REQUEST + " (最高优先级)");
-            System.err.println("╚══════════════════════════════════════════════════════════════╝");
-            
-            if (target != null && !ignoredTasks.contains(target)) {
+            if (target != null && !ignoredTasks.contains(target) && !helpRequestTasks.contains(target)) {
                 helpRequestTasks.add(target);
                 addTask(target, PRIORITY_HELP_REQUEST);
             }
@@ -346,29 +325,22 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
     }
 
     /**
- * 处理救护车消息 - 统一添加到帮助请求任务
- */
-private void handleAmbulanceMessage(CommunicationMessage message) {
-    if (message instanceof MessageAmbulanceTeam) {
-        MessageAmbulanceTeam mat = (MessageAmbulanceTeam) message;
-        EntityID target = mat.getTargetID();
-        
-        System.err.println("╔══════════════════════════════════════════════════════════════╗");
-        System.err.println("║  [警察分配器] 🚨 收到救护车开路请求！                         ║");
-        System.err.println("║  救护车 ID: " + mat.getAgentID());
-        System.err.println("║  需要清理的道路: " + target);
-        System.err.println("║  优先级: " + PRIORITY_HELP_REQUEST + " (最高优先级)");
-        System.err.println("╚══════════════════════════════════════════════════════════════╝");
-        
-        if (target != null && !ignoredTasks.contains(target)) {
-            helpRequestTasks.add(target);
-            addTask(target, PRIORITY_HELP_REQUEST);
+     * 处理救护车消息 - 统一添加到帮助请求任务（去重）
+     */
+    private void handleAmbulanceMessage(CommunicationMessage message) {
+        if (message instanceof MessageAmbulanceTeam) {
+            MessageAmbulanceTeam mat = (MessageAmbulanceTeam) message;
+            EntityID target = mat.getTargetID();
+            
+            if (target != null && !ignoredTasks.contains(target) && !helpRequestTasks.contains(target)) {
+                helpRequestTasks.add(target);
+                addTask(target, PRIORITY_HELP_REQUEST);
+            }
         }
     }
-}
 
     /**
-     * 处理被困人员消息 - 清理建筑门口道路
+     * 处理被困人员消息 - 清理建筑门口道路（去重）
      */
     private void handleTrappedMessage(CommunicationMessage message) {
         EntityID trappedPosition = null;
@@ -416,13 +388,13 @@ private void handleAmbulanceMessage(CommunicationMessage message) {
                 Building building = (Building) positionEntity;
                 for (EntityID neighbourId : building.getNeighbours()) {
                     StandardEntity neighbour = this.worldInfo.getEntity(neighbourId);
-                    if (neighbour instanceof Road && !ignoredTasks.contains(neighbourId)) {
+                    if (neighbour instanceof Road && !ignoredTasks.contains(neighbourId) && !helpRequestTasks.contains(neighbourId)) {
                         System.err.println("[警察分配器] 🆘 收到" + type + "被困消息，需要清理道路: " + neighbourId);
                         helpRequestTasks.add(neighbourId);
                         addTask(neighbourId, PRIORITY_HELP_REQUEST);
                     }
                 }
-            } else if (positionEntity instanceof Road && !ignoredTasks.contains(trappedPosition)) {
+            } else if (positionEntity instanceof Road && !ignoredTasks.contains(trappedPosition) && !helpRequestTasks.contains(trappedPosition)) {
                 System.err.println("[警察分配器] 🆘 收到" + type + "被困消息，需要清理道路: " + trappedPosition);
                 helpRequestTasks.add(trappedPosition);
                 addTask(trappedPosition, PRIORITY_HELP_REQUEST);
@@ -546,7 +518,6 @@ private void handleAmbulanceMessage(CommunicationMessage message) {
             helpRequestTasks.remove(completed);
             refugePaths.remove(completed);
             firePaths.remove(completed);
-            buildingRoads.remove(completed);
             
             List<Task> toRemove = new ArrayList<>();
             for (Task task : taskQueue) {
@@ -558,11 +529,10 @@ private void handleAmbulanceMessage(CommunicationMessage message) {
         }
         completedTasks.clear();
         
-        // 添加任务
+        // 添加任务（只包含高优先级任务）
         for (EntityID road : helpRequestTasks) addTask(road, PRIORITY_HELP_REQUEST);
         for (EntityID road : refugePaths) addTask(road, PRIORITY_REFUGE_PATH);
         for (EntityID road : firePaths) addTask(road, PRIORITY_FIRE_PATH);
-        for (EntityID road : buildingRoads) addTask(road, PRIORITY_BUILDING_PATH);
 
         List<Task> expired = new ArrayList<>();
         for (Task task : taskQueue) {
@@ -574,115 +544,73 @@ private void handleAmbulanceMessage(CommunicationMessage message) {
     }
 
     /**
- * 为帮助请求任务寻找最佳警察（和救护车一样的逻辑）
- * 策略：优先空闲 -> 无空闲则打断低优先级任务 -> 距离优先
- * 注意：警察不需要检查可达性，因为警察会清理路上的障碍
- */
-private EntityID findBestPoliceForHelpRequest(Task task) {
-    EntityID bestPolice = null;
-    double bestDistance = Double.MAX_VALUE;
-    PoliceInfo bestInfo = null;
-    
-    System.err.println("╔══════════════════════════════════════════════════════════════╗");
-    System.err.println("║  [警察分配器] 🔍 为帮助请求寻找警察                           ║");
-    System.err.println("║  需要清理的道路: " + task.target);
-    System.err.println("║  注意: 警察会清理路上的障碍，所以不检查可达性                  ║");
-    System.err.println("╚══════════════════════════════════════════════════════════════╝");
-    
-    int idleCount = 0;
-    int busyCount = 0;
-    
-    // 第一轮：找空闲的警察（只按距离，不检查可达性）
-    for (Map.Entry<EntityID, PoliceInfo> entry : policeMap.entrySet()) {
-        EntityID policeId = entry.getKey();
-        PoliceInfo info = entry.getValue();
+     * 为帮助请求任务寻找最佳警察
+     */
+    private EntityID findBestPoliceForHelpRequest(Task task) {
+        EntityID bestPolice = null;
+        double bestDistance = Double.MAX_VALUE;
+        PoliceInfo bestInfo = null;
         
-        if (info.currentTask == null) {
-            idleCount++;
-            double distance = getDistance(policeId, task.target);
-            System.err.println("[警察分配器] 空闲警察 " + policeId + ", 距离=" + (int)distance);
+        // 第一轮：找空闲的警察（只按距离，不检查可达性）
+        for (Map.Entry<EntityID, PoliceInfo> entry : policeMap.entrySet()) {
+            EntityID policeId = entry.getKey();
+            PoliceInfo info = entry.getValue();
             
+            if (info.currentTask == null) {
+                double distance = getDistance(policeId, task.target);
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    bestPolice = policeId;
+                    bestInfo = info;
+                }
+            }
+        }
+        
+        if (bestPolice != null) {
+            return bestPolice;
+        }
+        
+        // 第二轮：没有空闲，找可以打断的
+        bestDistance = Double.MAX_VALUE;
+        
+        for (Map.Entry<EntityID, PoliceInfo> entry : policeMap.entrySet()) {
+            EntityID policeId = entry.getKey();
+            PoliceInfo info = entry.getValue();
+            
+            if (info.currentTask == null) {
+                continue;
+            }
+            
+            // 检查是否可以打断（当前任务优先级 > 新任务优先级）
+            boolean canInterrupt = (info.currentTaskPriority > PRIORITY_HELP_REQUEST);
+            if (!canInterrupt) {
+                continue;
+            }
+            
+            double distance = getDistance(policeId, task.target);
             if (distance < bestDistance) {
                 bestDistance = distance;
                 bestPolice = policeId;
                 bestInfo = info;
             }
-        } else {
-            busyCount++;
-            System.err.println("[警察分配器] 忙碌警察 " + policeId + 
-                               ", 当前任务=" + info.currentTask + 
-                               ", 优先级=" + info.currentTaskPriority);
-        }
-    }
-    
-    System.err.println("[警察分配器] 统计: 空闲=" + idleCount + ", 忙碌=" + busyCount);
-    
-    if (bestPolice != null) {
-        System.err.println("[警察分配器] ✅ 分配空闲警察: " + bestPolice + 
-                           " 距离=" + (int)bestDistance);
-        return bestPolice;
-    }
-    
-    // 第二轮：没有空闲，找可以打断的（只按距离，不检查可达性）
-    System.err.println("[警察分配器] ⚠️ 无空闲警察，尝试打断低优先级任务");
-    
-    bestDistance = Double.MAX_VALUE;
-    int skippedByPriorityCount = 0;
-    
-    for (Map.Entry<EntityID, PoliceInfo> entry : policeMap.entrySet()) {
-        EntityID policeId = entry.getKey();
-        PoliceInfo info = entry.getValue();
-        
-        if (info.currentTask == null) {
-            continue;
         }
         
-        // 检查是否可以打断（当前任务优先级 > 新任务优先级）
-        boolean canInterrupt = (info.currentTaskPriority > PRIORITY_HELP_REQUEST);
-        
-        System.err.println("[警察分配器] 检查警察 " + policeId + 
-                           ": 当前任务优先级=" + info.currentTaskPriority + 
-                           ", 可打断=" + canInterrupt);
-        
-        if (!canInterrupt) {
-            skippedByPriorityCount++;
-            System.err.println("[警察分配器]   ⏭️ 跳过: 优先级 " + info.currentTaskPriority + 
-                               " 不高于 " + PRIORITY_HELP_REQUEST);
-            continue;
+        if (bestPolice != null) {
+            System.err.println("╔══════════════════════════════════════════════════════════════╗");
+            System.err.println("║  [警察分配器] 🔥 打断警察 " + bestPolice + " 的任务！           ║");
+            System.err.println("║  原任务: " + bestInfo.currentTask + 
+                               " (优先级=" + bestInfo.currentTaskPriority + ")");
+            System.err.println("║  新任务: " + task.target + 
+                               " (优先级=" + task.priority + ")");
+            System.err.println("╚══════════════════════════════════════════════════════════════╝");
+            return bestPolice;
         }
         
-        // 不检查可达性，只按距离
-        double distance = getDistance(policeId, task.target);
-        System.err.println("[警察分配器]   距离=" + (int)distance);
-        
-        if (distance < bestDistance) {
-            bestDistance = distance;
-            bestPolice = policeId;
-            bestInfo = info;
-        }
+        return null;
     }
-    
-    System.err.println("[警察分配器] 统计: 忙碌=" + busyCount + 
-                       ", 因优先级跳过=" + skippedByPriorityCount);
-    
-    if (bestPolice != null) {
-        System.err.println("╔══════════════════════════════════════════════════════════════╗");
-        System.err.println("║  [警察分配器] 🔥 打断警察 " + bestPolice + " 的任务！           ║");
-        System.err.println("║  原任务: " + bestInfo.currentTask + 
-                           " (优先级=" + bestInfo.currentTaskPriority + ")");
-        System.err.println("║  新任务: " + task.target + 
-                           " (优先级=" + task.priority + ")");
-        System.err.println("║  距离: " + (int)bestDistance);
-        System.err.println("╚══════════════════════════════════════════════════════════════╝");
-        return bestPolice;
-    }
-    
-    System.err.println("[警察分配器] ❌ 无法找到合适的警察执行任务: " + task.target);
-    return null;
-}
 
     /**
-     * 找最近的空闲警察（用于低优先级任务）
+     * 找最近的空闲警察（用于低优先级任务：避难所通道、消防通道）
      */
     private EntityID findBestIdlePolice(Task task) {
         EntityID bestPolice = null;
@@ -738,10 +666,8 @@ private EntityID findBestPoliceForHelpRequest(Task task) {
             EntityID bestPolice = null;
             
             if (task.priority == PRIORITY_HELP_REQUEST) {
-                // 帮助请求：优先空闲，无空闲则打断
                 bestPolice = findBestPoliceForHelpRequest(task);
             } else {
-                // 其他任务：只分配给空闲警察
                 bestPolice = findBestIdlePolice(task);
             }
             
@@ -764,7 +690,6 @@ private EntityID findBestPoliceForHelpRequest(Task task) {
         helpRequestTasks.removeAll(assignedTasks);
         refugePaths.removeAll(assignedTasks);
         firePaths.removeAll(assignedTasks);
-        buildingRoads.removeAll(assignedTasks);
     }
 
     /**
@@ -775,28 +700,8 @@ private EntityID findBestPoliceForHelpRequest(Task task) {
             case PRIORITY_HELP_REQUEST: return "帮助请求";
             case PRIORITY_REFUGE_PATH: return "避难所通道";
             case PRIORITY_FIRE_PATH: return "消防通道";
-            case PRIORITY_BUILDING_PATH: return "建筑周边道路";
             default: return "普通任务";
         }
-    }
-
-    /**
-     * 获取任务优先级
-     */
-    private int getTaskPriority(EntityID task) {
-        if (helpRequestTasks.contains(task)) return PRIORITY_HELP_REQUEST;
-        if (refugePaths.contains(task)) return PRIORITY_REFUGE_PATH;
-        if (firePaths.contains(task)) return PRIORITY_FIRE_PATH;
-        if (buildingRoads.contains(task)) return PRIORITY_BUILDING_PATH;
-        return PRIORITY_NEAREST;
-    }
-
-    private boolean isTaskOverAssigned(EntityID task) {
-        return taskAssignCount.getOrDefault(task, 0) >= MAX_POLICE_PER_TASK;
-    }
-
-    private void incrementTaskCount(EntityID task) {
-        taskAssignCount.put(task, taskAssignCount.getOrDefault(task, 0) + 1);
     }
 
     private void releaseTask(EntityID task) {
@@ -858,7 +763,6 @@ private EntityID findBestPoliceForHelpRequest(Task task) {
                     helpRequestTasks.remove(id);
                     refugePaths.remove(id);
                     firePaths.remove(id);
-                    buildingRoads.remove(id);
                     taskAssignCount.remove(id);
                     System.err.println("[ZCWL_2026] 道路已清理，忽略: " + id);
                 }
@@ -894,7 +798,7 @@ private EntityID findBestPoliceForHelpRequest(Task task) {
         PoliceInfo(EntityID id) {
             this.id = id;
             this.currentTask = null;
-            this.currentTaskPriority = PRIORITY_NEAREST;
+            this.currentTaskPriority = PRIORITY_FIRE_PATH; // 默认优先级，实际不会被使用
             this.isBusy = false;
             this.canNewAction = true;
             this.commandTime = -1;

@@ -53,11 +53,11 @@ public class PoliceCommandExecutor extends adf.core.component.centralized.Comman
         this.completedTasks = new HashSet<>();
         this.msgManager = null;
         
-        System.err.println("╔══════════════════════════════════════════════════════════════╗");
+       /* System.err.println("╔══════════════════════════════════════════════════════════════╗");
         System.err.println("║  [ZCWL_2026] 警车执行器已加载（跨区域版）                     ║");
         System.err.println("║  ID: " + ai.getID() + "                                         ║");
         System.err.println("╚══════════════════════════════════════════════════════════════╝");
-
+       */                             
         switch (scenarioInfo.getMode()) {
             case PRECOMPUTATION_PHASE:
             case PRECOMPUTED:
@@ -243,51 +243,58 @@ public class PoliceCommandExecutor extends adf.core.component.centralized.Comman
     }
 
     /**
-     * 自主模式 - 跨区域找最近的障碍物清理
-     */
-    private Action handleAutonomy() {
-        EntityID position = this.agentInfo.getPosition();
-        System.err.println("[警车执行器] handleAutonomy() 开始，当前位置=" + position + ", target=" + this.target);
+ * 自主模式 - 优先本区域，然后被困通道，最后全局
+ */
+private Action handleAutonomy() {
+    EntityID position = this.agentInfo.getPosition();
+    System.err.println("[警车执行器] handleAutonomy() 开始，当前位置=" + position + ", target=" + this.target);
 
-        // 1. 检查当前任务是否有效
-        if (this.target != null) {
-            StandardEntity targetEntity = this.worldInfo.getEntity(this.target);
-            if (targetEntity instanceof Road) {
-                Road road = (Road) targetEntity;
-                if (road.isBlockadesDefined() && !road.getBlockades().isEmpty()) {
-                    // 任务有效，继续执行
-                    System.err.println("[警车执行器] 当前目标道路 " + this.target + " 仍有路障，继续清理");
-                    return this.actionExtClear.setTarget(this.target).calc().getAction();
-                } else {
-                    System.err.println("[警车执行器] 当前目标道路 " + this.target + " 已清理，清除目标");
-                    this.target = null;
-                }
+    // 1. 检查当前任务是否有效
+    if (this.target != null) {
+        StandardEntity targetEntity = this.worldInfo.getEntity(this.target);
+        if (targetEntity instanceof Road) {
+            Road road = (Road) targetEntity;
+            if (road.isBlockadesDefined() && !road.getBlockades().isEmpty()) {
+                System.err.println("[警车执行器] 当前目标道路 " + this.target + " 仍有路障，继续清理");
+                return this.actionExtClear.setTarget(this.target).calc().getAction();
             } else {
-                System.err.println("[警车执行器] 当前目标不是道路，清除目标");
+                System.err.println("[警车执行器] 当前目标道路 " + this.target + " 已清理，清除目标");
                 this.target = null;
             }
+        } else {
+            System.err.println("[警车执行器] 当前目标不是道路，清除目标");
+            this.target = null;
         }
-
-        // 2. 优先处理被困人员通道任务
-        EntityID bestRoad = findBestTrappedPath(position);
-        if (bestRoad != null) {
-            this.target = bestRoad;
-            System.err.println("[警车执行器] 找到被困人员通道: " + bestRoad + "，准备清理");
-            return this.actionExtClear.setTarget(this.target).calc().getAction();
-        }
-
-        // 3. 跨区域寻找最近的障碍物（全局搜索）
-        bestRoad = findNearestRoadToClearGlobal(position);
-        if (bestRoad != null) {
-            this.target = bestRoad;
-            System.err.println("[警车执行器] 找到全局最近障碍物: " + bestRoad + "，准备清理");
-            return this.actionExtClear.setTarget(this.target).calc().getAction();
-        }
-
-        // 4. 真的没有任何障碍物，才去避难所
-        System.err.println("[警车执行器] 全图没有需要清理的道路，去避难所休息");
-        return handleRest();
     }
+
+    // 2. 本区域内最近的障碍物（新增）
+    EntityID zoneRoad = findNearestRoadInZone(position);
+    if (zoneRoad != null) {
+        this.target = zoneRoad;
+        System.err.println("[警车执行器] 在本区域内找到障碍物: " + zoneRoad + "，准备清理");
+        return this.actionExtClear.setTarget(this.target).calc().getAction();
+    }
+
+    // 3. 优先处理被困人员通道任务
+    EntityID bestRoad = findBestTrappedPath(position);
+    if (bestRoad != null) {
+        this.target = bestRoad;
+        System.err.println("[警车执行器] 找到被困人员通道: " + bestRoad + "，准备清理");
+        return this.actionExtClear.setTarget(this.target).calc().getAction();
+    }
+
+    // 4. 跨区域寻找最近的障碍物（全局搜索）
+    bestRoad = findNearestRoadToClearGlobal(position);
+    if (bestRoad != null) {
+        this.target = bestRoad;
+        System.err.println("[警车执行器] 找到全局最近障碍物: " + bestRoad + "，准备清理");
+        return this.actionExtClear.setTarget(this.target).calc().getAction();
+    }
+
+    // 5. 真的没有任何障碍物，才去避难所
+    System.err.println("[警车执行器] 全图没有需要清理的道路，去避难所休息");
+    return handleRest();
+}
 
     /**
      * 寻找被困人员通道
@@ -450,4 +457,36 @@ public class PoliceCommandExecutor extends adf.core.component.centralized.Comman
     public List<EntityID> getResult() {
         return null;
     }
+    /**
+ * 在本区域内寻找最近的、有路障且可达的道路
+ */
+private EntityID findNearestRoadInZone(EntityID position) {
+    if (this.myZoneRoads == null || this.myZoneRoads.isEmpty()) {
+        return null;
+    }
+
+    EntityID nearest = null;
+    int minDistance = Integer.MAX_VALUE;
+
+    for (EntityID roadId : this.myZoneRoads) {
+        StandardEntity entity = this.worldInfo.getEntity(roadId);
+        if (!(entity instanceof Road)) continue;
+        Road road = (Road) entity;
+        if (!road.isBlockadesDefined() || road.getBlockades().isEmpty()) continue;
+
+        // 检查是否可达
+        if (!isReachable(position, roadId)) continue;
+
+        List<EntityID> path = this.pathPlanning.getResult(position, roadId);
+        if (path != null && path.size() < minDistance) {
+            minDistance = path.size();
+            nearest = roadId;
+        }
+    }
+
+    if (nearest != null) {
+        System.err.println("[警车执行器] 本区域内找到最近道路: " + nearest + "，距离=" + minDistance);
+    }
+    return nearest;
+}
 }

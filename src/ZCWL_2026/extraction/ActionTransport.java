@@ -2,7 +2,6 @@ package ZCWL_2026.extraction;
 
 import adf.core.agent.action.Action;
 import adf.core.agent.action.ambulance.ActionLoad;
-import adf.core.agent.action.ambulance.ActionRescue;
 import adf.core.agent.action.ambulance.ActionUnload;
 import adf.core.agent.action.common.ActionMove;
 import adf.core.agent.action.common.ActionRest;
@@ -22,7 +21,6 @@ import rescuecore2.standard.entities.*;
 import rescuecore2.worldmodel.EntityID;
 
 import java.util.*;
-
 import static rescuecore2.standard.entities.StandardEntityURN.*;
 
 public class ActionTransport extends ExtAction {
@@ -89,7 +87,7 @@ public class ActionTransport extends ExtAction {
         }
         
         if (this.target != null) {
-            this.result = this.calcRescue(agent, this.pathPlanning, this.target);
+            this.result = this.calcLoad(agent, this.pathPlanning, this.target);
         }
         return this;
     }
@@ -129,7 +127,7 @@ public class ActionTransport extends ExtAction {
         return nearest;
     }
 
-    private Action calcRescue(AmbulanceTeam agent, PathPlanning pathPlanning, EntityID targetID) {
+    private Action calcLoad(AmbulanceTeam agent, PathPlanning pathPlanning, EntityID targetID) {
         StandardEntity targetEntity = this.worldInfo.getEntity(targetID);
         if (targetEntity == null) return null;
         
@@ -140,7 +138,7 @@ public class ActionTransport extends ExtAction {
             if (!human.isPositionDefined()) return null;
             
             if (human.isHPDefined() && human.getHP() == 0) {
-                System.err.println("[救护车] ❌ 平民 " + human.getID() + " 已死亡，放弃任务");
+                System.err.println("[救护车] ❌ 目标 " + human.getID() + " 已死亡，放弃任务");
                 this.target = null;
                 return null;
             }
@@ -158,39 +156,34 @@ public class ActionTransport extends ExtAction {
                     return null;
                 }
                 
-                // 被掩埋的平民：放弃目标，让救护车寻找其他任务
-                if (freshHuman.isBuriednessDefined() && freshHuman.getBuriedness() > 0) {
-                    System.err.println("[救护车] ⚠️ 平民 " + targetID + " 仍被掩埋 (埋压度=" + freshHuman.getBuriedness() + ")，放弃等待");
+                boolean isBuried = freshHuman.isBuriednessDefined() && freshHuman.getBuriedness() > 0;
+                
+                // 仅处理掩埋度为0的单位（已挖出）
+                if (!isBuried) {
+                    boolean hasDamage = freshHuman.isDamageDefined() && freshHuman.getDamage() > 0;
+                    System.err.println("╔══════════════════════════════════════════════════════════════╗");
+                    System.err.println("║  [救护车] 📦 装载单位: " + freshHuman.getID() + 
+                                       " 类型=" + freshHuman.getStandardURN() +
+                                       " 伤害=" + (hasDamage ? freshHuman.getDamage() : 0));
+                    System.err.println("╚══════════════════════════════════════════════════════════════╝");
+                    EntityID nearestRefuge = findNearestRefuge(agentPosition);
+                    if (nearestRefuge != null) {
+                        this.target = nearestRefuge;
+                        System.err.println("[救护车] 🏥 装载完成，前往避难所: " + nearestRefuge);
+                    }
+                    return new ActionLoad(freshHuman.getID());
+                } else {
+                    // 被掩埋的单位，放弃等待
+                    System.err.println("[救护车] ⏳ 单位 " + freshHuman.getID() + " 仍被掩埋，等待消防员挖掘");
                     this.target = null;
                     return null;
                 }
-                
-                if (freshHuman.getStandardURN() == CIVILIAN) {
-                    if (freshHuman.isDamageDefined() && freshHuman.getDamage() > 0) {
-                        System.err.println("╔══════════════════════════════════════════════════════════════╗");
-                        System.err.println("║  [救护车] 📦 装载受伤平民: " + freshHuman.getID() + " 伤害=" + freshHuman.getDamage());
-                        System.err.println("╚══════════════════════════════════════════════════════════════╝");
-                        EntityID nearestRefuge = findNearestRefuge(agentPosition);
-                        if (nearestRefuge != null) {
-                            this.target = nearestRefuge;
-                            System.err.println("[救护车] 🏥 装载完成，前往避难所: " + nearestRefuge);
-                        }
-                        return new ActionLoad(freshHuman.getID());
-                    } else {
-                        System.err.println("[救护车] ⚠️ 平民 " + freshHuman.getID() + " 已挖出但未受伤，无需装载");
-                        this.target = null;
-                        return null;
-                    }
-                }
-                
-                System.err.println("[救护车] ⚠️ 目标 " + freshHuman.getID() + " 不是平民，放弃");
-                this.target = null;
-                return null;
-                
-            } else {
+            } 
+            else {
+                // 未到达目标位置，移动过去
                 List<EntityID> path = pathPlanning.getResult(agentPosition, targetPosition);
                 if (path != null && path.size() > 0) {
-                    System.err.println("[救护车] 📍 移动到平民位置: " + targetPosition);
+                    System.err.println("[救护车] 📍 移动到目标位置: " + targetPosition);
                     return new ActionMove(path);
                 }
             }

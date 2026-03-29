@@ -46,10 +46,10 @@ public class FireCommandExecutor extends adf.core.component.centralized.CommandE
         super(ai, wi, si, moduleManager, developData);
         this.commandType = ACTION_UNKNOWN;
         
-        System.err.println("╔══════════════════════════════════════════════════════════════╗");
+        /*System.err.println("╔══════════════════════════════════════════════════════════════╗");
         System.err.println("║  [ZCWL_2026] 消防车执行器已加载！                            ║");
         System.err.println("║  ID: " + ai.getID() + "                                         ║");
-        System.err.println("╚══════════════════════════════════════════════════════════════╝");
+        System.err.println("╚══════════════════════════════════════════════════════════════╝");*/
 
         switch (scenarioInfo.getMode()) {
             case PRECOMPUTATION_PHASE:
