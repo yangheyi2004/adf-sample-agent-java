@@ -7,8 +7,10 @@ import adf.core.agent.info.ScenarioInfo;
 import adf.core.agent.info.WorldInfo;
 import adf.core.agent.module.ModuleManager;
 import adf.core.agent.precompute.PrecomputeData;
+import rescuecore2.misc.Pair;
 import rescuecore2.misc.collections.LazyMap;
 import rescuecore2.standard.entities.Area;
+import rescuecore2.standard.entities.StandardEntity;
 import rescuecore2.worldmodel.Entity;
 import rescuecore2.worldmodel.EntityID;
 
@@ -16,24 +18,38 @@ import java.util.*;
 
 public class PathPlanning extends adf.core.component.module.algorithm.PathPlanning {
 
-    // 图结构：存储每个节点的邻居
-    private Map<EntityID, Set<EntityID>> graph;
+    // ========== 使用 WeakHashMap 避免内存泄漏 ==========
+    private static Map<WorldInfo, Map<EntityID, Set<EntityID>>> graphCache = new WeakHashMap<>();
     
-    // 路径规划参数
-    private EntityID from;                      // 起点
-    private Collection<EntityID> targets;      // 目标点集合
-    private List<EntityID> result;             // 计算结果（路径）
+    // ========== 缓存大小限制 ==========
+    private static final int MAX_CACHE_SIZE = 5000;
+    private static final int MAX_SEARCH_DEPTH = 3000;
+    
+    private Map<EntityID, Set<EntityID>> graph;
+    private Map<String, List<EntityID>> pathCache = new LinkedHashMap<String, List<EntityID>>() {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, List<EntityID>> eldest) {
+            return size() > MAX_CACHE_SIZE;  // 超过限制时移除最旧的条目
+        }
+    };
 
-    public PathPlanning(AgentInfo ai, WorldInfo wi, ScenarioInfo si, 
+    private EntityID from;
+    private Collection<EntityID> targets;
+    private List<EntityID> result;
+
+    public PathPlanning(AgentInfo ai, WorldInfo wi, ScenarioInfo si,
                         ModuleManager moduleManager, DevelopData developData) {
         super(ai, wi, si, moduleManager, developData);
-        initGraph();  // 初始化图结构
+        initGraph();
     }
 
-    /**
-     * 初始化图结构：构建所有Area之间的连接关系
-     */
-    private void initGraph() {
+    private synchronized void initGraph() {
+        // WeakHashMap 会自动清理不再被引用的 WorldInfo
+        if (graphCache.containsKey(this.worldInfo)) {
+            this.graph = graphCache.get(this.worldInfo);
+            return;
+        }
+        
         Map<EntityID, Set<EntityID>> neighbours = new LazyMap<EntityID, Set<EntityID>>() {
             @Override
             public Set<EntityID> createValue() {
@@ -41,14 +57,14 @@ public class PathPlanning extends adf.core.component.module.algorithm.PathPlanni
             }
         };
         
-        // 遍历所有实体，构建邻居关系
         for (Entity next : this.worldInfo) {
             if (next instanceof Area) {
-                Collection<EntityID> areaNeighbours = ((Area) next).getNeighbours();
-                neighbours.get(next.getID()).addAll(areaNeighbours);
+                neighbours.get(next.getID()).addAll(((Area) next).getNeighbours());
             }
         }
+        
         this.graph = neighbours;
+        graphCache.put(this.worldInfo, this.graph);
     }
 
     @Override
@@ -68,105 +84,168 @@ public class PathPlanning extends adf.core.component.module.algorithm.PathPlanni
         return this;
     }
 
+    /**
+     * 生成稳定的缓存键
+     */
+    private String generateCacheKey() {
+        if (from == null || targets == null) return null;
+        
+        StringBuilder sb = new StringBuilder();
+        sb.append(from.getValue()).append("->");
+        
+        // 对目标进行排序，确保相同目标集合产生相同键
+        List<Integer> sortedTargets = new ArrayList<>();
+        for (EntityID id : targets) {
+            sortedTargets.add(id.getValue());
+        }
+        Collections.sort(sortedTargets);
+        
+        for (int i = 0; i < sortedTargets.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(sortedTargets.get(i));
+        }
+        
+        return sb.toString();
+    }
+
+    @Override
+    public PathPlanning calc() {
+        if (from == null || targets == null || targets.isEmpty()) {
+            result = null;
+            return this;
+        }
+        
+        String key = generateCacheKey();
+        if (key != null && pathCache.containsKey(key)) {
+            result = pathCache.get(key);
+            return this;
+        }
+
+        // ========== A* 算法 ==========
+        Map<EntityID, Double> gScore = new HashMap<>();
+        Map<EntityID, Double> fScore = new HashMap<>();
+        Map<EntityID, EntityID> cameFrom = new HashMap<>();
+        PriorityQueue<EntityID> openSet = new PriorityQueue<>(Comparator.comparingDouble(fScore::get));
+
+        gScore.put(from, 0.0);
+        fScore.put(from, heuristic(from));
+        openSet.add(from);
+
+        EntityID current = null;
+        boolean found = false;
+        int searchDepth = 0;
+
+        while (!openSet.isEmpty() && searchDepth < MAX_SEARCH_DEPTH) {
+            current = openSet.poll();
+            if (isGoal(current, targets)) {
+                found = true;
+                break;
+            }
+            
+            Set<EntityID> neighbours = graph.get(current);
+            if (neighbours != null) {
+                for (EntityID neighbor : neighbours) {
+                    double tentativeG = gScore.get(current) + distance(current, neighbor);
+                    if (tentativeG < gScore.getOrDefault(neighbor, Double.MAX_VALUE)) {
+                        cameFrom.put(neighbor, current);
+                        gScore.put(neighbor, tentativeG);
+                        double h = heuristic(neighbor);
+                        fScore.put(neighbor, tentativeG + h);
+                        if (!openSet.contains(neighbor)) openSet.add(neighbor);
+                    }
+                }
+            }
+            searchDepth++;
+        }
+
+        if (!found) {
+            // 搜索超限或未找到路径
+            if (searchDepth >= MAX_SEARCH_DEPTH) {
+                System.err.println("[PathPlanning] 搜索深度超限 (" + MAX_SEARCH_DEPTH + ")，放弃计算");
+            }
+            result = null;
+            return this;
+        }
+
+        List<EntityID> path = new LinkedList<>();
+        EntityID node = current;
+        while (node != null && !node.equals(from)) {
+            path.add(0, node);
+            node = cameFrom.get(node);
+        }
+        path.add(0, from);
+        result = path;
+        
+        // 只有有效路径才缓存
+        if (key != null && result != null && !result.isEmpty()) {
+            pathCache.put(key, result);
+        }
+        
+        return this;
+    }
+
+    private double heuristic(EntityID id) {
+        if (targets == null || targets.isEmpty()) return 0;
+        StandardEntity entity = this.worldInfo.getEntity(id);
+        if (!(entity instanceof Area)) return 0;
+        Pair<Integer, Integer> loc = this.worldInfo.getLocation((Area) entity);
+        double minDist = Double.MAX_VALUE;
+        for (EntityID target : targets) {
+            StandardEntity t = this.worldInfo.getEntity(target);
+            if (t instanceof Area) {
+                Pair<Integer, Integer> tLoc = this.worldInfo.getLocation((Area) t);
+                double dx = loc.first() - tLoc.first();
+                double dy = loc.second() - tLoc.second();
+                minDist = Math.min(minDist, Math.hypot(dx, dy));
+            }
+        }
+        return minDist;
+    }
+
+    private double distance(EntityID a, EntityID b) {
+        StandardEntity ea = this.worldInfo.getEntity(a);
+        StandardEntity eb = this.worldInfo.getEntity(b);
+        if (ea instanceof Area && eb instanceof Area) {
+            return this.worldInfo.getDistance((Area) ea, (Area) eb);
+        }
+        return 1.0;
+    }
+
+    private boolean isGoal(EntityID e, Collection<EntityID> test) {
+        return test.contains(e);
+    }
+
+    /**
+     * 可选：清理缓存的方法（在模拟结束时调用）
+     */
+    public void clearCache() {
+        pathCache.clear();
+    }
+    
+    /**
+     * 获取当前缓存大小（用于调试）
+     */
+    public int getCacheSize() {
+        return pathCache.size();
+    }
+
     @Override
     public PathPlanning updateInfo(MessageManager messageManager) {
-        super.updateInfo(messageManager);
         return this;
     }
 
     @Override
     public PathPlanning precompute(PrecomputeData precomputeData) {
-        super.precompute(precomputeData);
         return this;
     }
 
     @Override
     public PathPlanning resume(PrecomputeData precomputeData) {
-        super.resume(precomputeData);
         return this;
     }
 
     @Override
     public PathPlanning preparate() {
-        super.preparate();
         return this;
-    }
-
-    /**
-     * BFS算法计算最短路径
-     */
-    @Override
-    public PathPlanning calc() {
-        // 检查参数有效性
-        if (this.from == null || this.targets == null || this.targets.isEmpty()) {
-            this.result = null;
-            return this;
-        }
-        
-        // BFS搜索
-        List<EntityID> open = new LinkedList<>();           // 待搜索队列
-        Map<EntityID, EntityID> ancestors = new HashMap<>(); // 记录前驱节点
-        open.add(this.from);
-        EntityID next;
-        boolean found = false;
-        ancestors.put(this.from, this.from);
-        
-        do {
-            next = open.remove(0);  // 队列头节点
-            
-            // 检查当前节点是否为目标
-            if (isGoal(next, targets)) {
-                found = true;
-                break;
-            }
-            
-            // 获取邻居节点
-            Collection<EntityID> neighbours = graph.get(next);
-            if (neighbours == null || neighbours.isEmpty()) {
-                continue;
-            }
-            
-            // 遍历邻居
-            for (EntityID neighbour : neighbours) {
-                if (isGoal(neighbour, targets)) {
-                    ancestors.put(neighbour, next);
-                    next = neighbour;
-                    found = true;
-                    break;
-                } else {
-                    if (!ancestors.containsKey(neighbour)) {
-                        open.add(neighbour);
-                        ancestors.put(neighbour, next);
-                    }
-                }
-            }
-        } while (!found && !open.isEmpty());
-        
-        // 未找到路径
-        if (!found) {
-            this.result = null;
-            return this;
-        }
-        
-        // 构建路径（从目标回溯到起点）
-        EntityID current = next;
-        LinkedList<EntityID> path = new LinkedList<>();
-        do {
-            path.add(0, current);
-            current = ancestors.get(current);
-            if (current == null) {
-                throw new RuntimeException("Found a node with no ancestor! Something is broken.");
-            }
-        } while (!current.equals(this.from));
-        
-        this.result = path;
-        return this;
-    }
-
-    /**
-     * 判断节点是否为目标节点
-     */
-    private boolean isGoal(EntityID e, Collection<EntityID> test) {
-        return test.contains(e);
     }
 }

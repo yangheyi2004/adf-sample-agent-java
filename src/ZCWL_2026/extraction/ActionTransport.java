@@ -7,6 +7,7 @@ import adf.core.agent.action.ambulance.ActionUnload;
 import adf.core.agent.action.common.ActionMove;
 import adf.core.agent.action.common.ActionRest;
 import adf.core.agent.communication.MessageManager;
+import adf.core.agent.communication.standard.bundle.centralized.MessageReport;
 import adf.core.agent.communication.standard.bundle.information.*;
 import adf.core.agent.develop.DevelopData;
 import adf.core.agent.info.AgentInfo;
@@ -31,12 +32,31 @@ public class ActionTransport extends ExtAction {
     private int kernelTime;
     private EntityID target;
     private MessageManager msgManager;
+    
+    private static final int MAX_LOAD_DISTANCE = 100;
+    private static final int MOVE_CLOSE_DISTANCE = 80;
+    private static final int MAX_STUCK_COUNT = 30;
+    private static final int MAX_NO_PROGRESS = 20;
+    
+    private EntityID lastPosition;
+    private int stuckCounter;
+    private EntityID lastTarget;
+    private int noProgressCounter;
+    
+    private Set<EntityID> processedVictims;
+    private Set<EntityID> invalidBuildings;
 
     public ActionTransport(AgentInfo agentInfo, WorldInfo worldInfo, ScenarioInfo scenarioInfo,
                            ModuleManager moduleManager, DevelopData developData) {
         super(agentInfo, worldInfo, scenarioInfo, moduleManager, developData);
         this.target = null;
         this.thresholdRest = developData.getInteger("ActionTransport.rest", 100);
+        this.lastPosition = null;
+        this.stuckCounter = 0;
+        this.lastTarget = null;
+        this.noProgressCounter = 0;
+        this.processedVictims = new HashSet<>();
+        this.invalidBuildings = new HashSet<>();
 
         switch (scenarioInfo.getMode()) {
             case PRECOMPUTATION_PHASE:
@@ -74,37 +94,65 @@ public class ActionTransport extends ExtAction {
     public ExtAction calc() {
         this.result = null;
         AmbulanceTeam agent = (AmbulanceTeam) this.agentInfo.me();
-        Human transportHuman = this.agentInfo.someoneOnBoard();
+        EntityID agentID = this.agentInfo.getID();
+        EntityID currentPos = this.agentInfo.getPosition();
+        
+        if (lastPosition != null && lastPosition.equals(currentPos)) {
+            stuckCounter++;
+            if (stuckCounter > MAX_STUCK_COUNT) {
+                System.err.println("[救护车] ID:" + agentID + " ⚠️ 卡住超过30步，重置状态");
+                this.target = null;
+                stuckCounter = 0;
+            }
+        } else {
+            stuckCounter = 0;
+            lastPosition = currentPos;
+        }
+        
+        if (lastTarget != null && lastTarget.equals(this.target)) {
+            noProgressCounter++;
+            if (noProgressCounter > MAX_NO_PROGRESS) {
+                System.err.println("[救护车] ID:" + agentID + " ⚠️ 对目标 " + this.target + " 无进展，放弃");
+                this.target = null;
+                noProgressCounter = 0;
+            }
+        } else {
+            noProgressCounter = 0;
+            lastTarget = this.target;
+        }
 
-        // 1. 优先处理车上的伤员，运往避难所
+        Human transportHuman = this.agentInfo.someoneOnBoard();
         if (transportHuman != null) {
-            System.err.println("[救护车] 🚑 车上有伤员 ID:" + transportHuman.getID() + "，准备运输到避难所");
+            System.err.println("[救护车] 🚑 车上有伤员 ID:" + transportHuman.getID());
             this.result = this.calcUnloadToRefuge(agent);
             if (this.result != null) return this;
         }
 
-        // 2. 需要休息时前往避难所
         if (this.needRest(agent)) {
             this.result = this.calcRefugeAction(agent, this.pathPlanning, null, false);
             if (this.result != null) return this;
         }
         
-        // 3. 有目标时处理
         if (this.target != null) {
             this.result = this.calcLoadOrRescue(agent, this.pathPlanning, this.target);
         }
         return this;
     }
 
-    /**
-     * 将车上伤员运往避难所
-     */
     private Action calcUnloadToRefuge(AmbulanceTeam agent) {
         EntityID agentPos = agent.getPosition();
         Collection<EntityID> refuges = this.worldInfo.getEntityIDsOfType(REFUGE);
         
         if (refuges.contains(agentPos)) {
             System.err.println("[救护车] 🏥 到达避难所，卸载伤员");
+            
+            Human passenger = this.agentInfo.someoneOnBoard();
+            if (passenger != null && passenger instanceof Civilian) {
+                if (passenger.isPositionDefined() && passenger.getPosition() != null) {
+                    MessageCivilian msg = new MessageCivilian(false, (Civilian) passenger);
+                    this.msgManager.addMessage(msg);
+                }
+            }
             return new ActionUnload();
         }
         
@@ -112,17 +160,12 @@ public class ActionTransport extends ExtAction {
         this.pathPlanning.setDestination(refuges);
         List<EntityID> path = this.pathPlanning.calc().getResult();
         if (path != null && !path.isEmpty()) {
-            System.err.println("[救护车] 📍 前往避难所运输伤员: " + path.get(path.size() - 1));
             return new ActionMove(path);
         }
         
-        System.err.println("[救护车] ⚠️ 无法找到通往避难所的路径");
         return null;
     }
 
-    /**
-     * 寻找最近的避难所
-     */
     private EntityID findNearestRefuge(EntityID position) {
         Collection<EntityID> refuges = this.worldInfo.getEntityIDsOfType(REFUGE);
         EntityID nearest = null;
@@ -137,94 +180,214 @@ public class ActionTransport extends ExtAction {
         return nearest;
     }
 
+    private boolean isValidBuilding(EntityID buildingId) {
+        if (buildingId == null) return false;
+        if (invalidBuildings.contains(buildingId)) return false;
+        
+        StandardEntity entity = this.worldInfo.getEntity(buildingId);
+        if (!(entity instanceof Building)) return true;
+        
+        Building building = (Building) entity;
+        if (!building.isXDefined() || !building.isYDefined()) {
+            invalidBuildings.add(buildingId);
+            return false;
+        }
+        
+        int x = building.getX();
+        int y = building.getY();
+        if (Math.abs(x) <= 10 && Math.abs(y) <= 10) {
+            invalidBuildings.add(buildingId);
+            return false;
+        }
+        
+        return true;
+    }
+    
+    private boolean isValidPositionEntity(EntityID positionId) {
+        if (positionId == null) return false;
+        StandardEntity entity = this.worldInfo.getEntity(positionId);
+        if (entity == null) return false;
+        if (entity instanceof Building) return isValidBuilding(positionId);
+        if (entity instanceof Road) {
+            Road road = (Road) entity;
+            return road.isXDefined() && road.isYDefined();
+        }
+        return true;
+    }
+    
+    private boolean isValidAndReachableVictim(EntityID victimId) {
+        Human h = (Human) this.worldInfo.getEntity(victimId);
+        if (h == null) return false;
+        
+        if (!h.isPositionDefined()) return false;
+        
+        EntityID pos = h.getPosition();
+        if (pos == null) return false;
+        
+        if (!isValidPositionEntity(pos)) return false;
+        
+        return true;
+    }
+
+    private boolean isVictimInRefuge(EntityID victimId) {
+        Human h = (Human) this.worldInfo.getEntity(victimId);
+        if (h == null) return false;
+        if (!h.isPositionDefined()) return false;
+        EntityID pos = h.getPosition();
+        if (pos == null) return false;
+        StandardEntity posEntity = this.worldInfo.getEntity(pos);
+        return posEntity != null && posEntity.getStandardURN() == REFUGE;
+    }
+    
+    private boolean isWithinLoadDistance(EntityID agentPos, EntityID targetPos) {
+        double distance = this.worldInfo.getDistance(agentPos, targetPos);
+        return distance <= MAX_LOAD_DISTANCE;
+    }
+    
+    private boolean isVictimAlreadyLoaded(EntityID victimId) {
+        if (processedVictims.contains(victimId)) return true;
+        
+        Human h = (Human) this.worldInfo.getEntity(victimId);
+        if (h != null && !h.isPositionDefined()) {
+            processedVictims.add(victimId);
+            return true;
+        }
+        
+        return false;
+    }
+    
     /**
-     * 处理目标：平民装载，非平民治疗（如果受伤）
+     * 检查目标是否为救护车自己
      */
+    private boolean isTargetSelf(EntityID targetId) {
+        EntityID agentID = this.agentInfo.getID();
+        if (targetId.equals(agentID)) {
+            System.err.println("[救护车] ❌ 严重错误！试图装载自己！ID:" + agentID);
+            return true;
+        }
+        return false;
+    }
+
     private Action calcLoadOrRescue(AmbulanceTeam agent, PathPlanning pathPlanning, EntityID targetID) {
+        // ========== 关键修复：检查是否试图装载自己 ==========
+        if (isTargetSelf(targetID)) {
+            this.target = null;
+            return null;
+        }
+        
         StandardEntity targetEntity = this.worldInfo.getEntity(targetID);
-        if (targetEntity == null) return null;
+        if (targetEntity == null) {
+            System.err.println("[救护车] ⚠️ 目标 " + targetID + " 不存在");
+            this.target = null;
+            return null;
+        }
         
         EntityID agentPosition = agent.getPosition();
         
         if (targetEntity instanceof Human) {
             Human human = (Human) targetEntity;
-            if (!human.isPositionDefined()) return null;
             
-            if (human.isHPDefined() && human.getHP() == 0) {
-                System.err.println("[救护车] ❌ 目标 " + human.getID() + " 已死亡，放弃任务");
+            // 检查是否是救护车（禁止装载其他救护车）
+            if (human instanceof AmbulanceTeam) {
+                System.err.println("[救护车] ❌ 试图装载其他救护车，拒绝！");
                 this.target = null;
                 return null;
             }
             
-            // 检查路径上是否有路障
-            if (hasBlockadeOnPath(agentPosition, human.getPosition())) {
+            if (isVictimAlreadyLoaded(targetID)) {
+                System.err.println("[救护车] ⚠️ 目标 " + targetID + " 已被装载");
+                this.target = null;
+                return null;
+            }
+            
+            if (!isValidAndReachableVictim(targetID)) {
+                System.err.println("[救护车] ⚠️ 目标 " + targetID + " 位置无效");
+                this.target = null;
+                return null;
+            }
+            
+            if (isVictimInRefuge(targetID)) {
+                System.err.println("[救护车] 🏥 平民 " + targetID + " 已在避难所");
+                this.target = null;
                 return null;
             }
             
             EntityID targetPosition = human.getPosition();
             
-            // 未到达目标位置，移动
-            if (agentPosition.getValue() != targetPosition.getValue()) {
-                List<EntityID> path = pathPlanning.getResult(agentPosition, targetPosition);
-                if (path != null && !path.isEmpty()) {
-                    System.err.println("[救护车] 📍 移动到目标位置: " + targetPosition);
-                    return new ActionMove(path);
-                }
-                return null;
-            }
-            
-            // 已到达目标位置，处理具体动作
-            Human freshHuman = (Human) this.worldInfo.getEntity(targetID);
-            if (freshHuman == null) {
+            if (human.isHPDefined() && human.getHP() == 0) {
+                System.err.println("[救护车] ❌ 目标 " + human.getID() + " 已死亡");
                 this.target = null;
                 return null;
             }
             
-            boolean isBuried = freshHuman.isBuriednessDefined() && freshHuman.getBuriedness() > 0;
-            
-            // 被掩埋 → 放弃（等待消防员挖掘）
+            boolean isBuried = human.isBuriednessDefined() && human.getBuriedness() > 0;
             if (isBuried) {
-                System.err.println("[救护车] ⏳ 单位 " + freshHuman.getID() + " 仍被掩埋，等待消防员挖掘");
+                System.err.println("[救护车] ⏳ 目标 " + human.getID() + " 仍被掩埋");
+                return null;
+            }
+            
+            boolean hasDamage = human.isDamageDefined() && human.getDamage() > 0;
+            if (!hasDamage) {
+                System.err.println("[救护车] ⚠️ 目标 " + human.getID() + " 未受伤");
                 this.target = null;
                 return null;
             }
             
-            // 掩埋度为0
-            boolean hasDamage = freshHuman.isDamageDefined() && freshHuman.getDamage() > 0;
-            StandardEntityURN type = freshHuman.getStandardURN();
+            double distance = this.worldInfo.getDistance(agentPosition, targetPosition);
             
-            // 平民：装载
-            if (type == CIVILIAN) {
+            if (distance <= MOVE_CLOSE_DISTANCE) {
+                Human finalCheck = (Human) this.worldInfo.getEntity(targetID);
+                if (finalCheck == null || !finalCheck.isPositionDefined()) {
+                    this.target = null;
+                    return null;
+                }
+                
+                if (isVictimAlreadyLoaded(targetID)) {
+                    this.target = null;
+                    return null;
+                }
+                
                 System.err.println("╔══════════════════════════════════════════════════════════════╗");
-                System.err.println("║  [救护车] 📦 装载平民: " + freshHuman.getID() + 
-                                   " 伤害=" + (hasDamage ? freshHuman.getDamage() : 0));
+                System.err.println("║  [救护车] 📦 装载平民: " + targetID);
+                System.err.println("║  距离: " + String.format("%.1f", distance));
                 System.err.println("╚══════════════════════════════════════════════════════════════╝");
+                
+                processedVictims.add(targetID);
+                
+                if (this.msgManager != null) {
+                    MessageReport report = new MessageReport(true, true, false, this.agentInfo.getID());
+                    this.msgManager.addMessage(report);
+                }
+                
                 EntityID nearestRefuge = findNearestRefuge(agentPosition);
                 if (nearestRefuge != null) {
                     this.target = nearestRefuge;
-                    System.err.println("[救护车] 🏥 装载完成，前往避难所: " + nearestRefuge);
+                } else {
+                    this.target = null;
                 }
-                return new ActionLoad(freshHuman.getID());
-            } 
-            // 非平民且受伤 → 治疗（减少伤害）
-            else if (hasDamage) {
-                System.err.println("╔══════════════════════════════════════════════════════════════╗");
-                System.err.println("║  [救护车] 🏥 治疗非平民单位: " + freshHuman.getID() + 
-                                   " 类型=" + type + " 伤害=" + freshHuman.getDamage());
-                System.err.println("╚══════════════════════════════════════════════════════════════╝");
-                // 注意：ActionRescue 可以降低伤害值，但不改变掩埋度
-                return new ActionRescue(freshHuman);
+                return new ActionLoad(targetID);
             }
-            // 非平民且无伤害 → 放弃
-            else {
-                System.err.println("[救护车] ⚠️ 非平民单位 " + freshHuman.getID() + 
-                                   " 已挖出但无伤害，无需治疗");
-                this.target = null;
+            
+            BlockadeInfo blockadeInfo = getFirstBlockadeOnPath(agentPosition, targetPosition);
+            if (blockadeInfo != null && blockadeInfo.hasBlockade) {
+                if (blockadeInfo.roadId != null) {
+                    List<EntityID> pathToBlockade = pathPlanning.getResult(agentPosition, blockadeInfo.roadId);
+                    if (pathToBlockade != null && !pathToBlockade.isEmpty()) {
+                        return new ActionMove(pathToBlockade);
+                    }
+                }
                 return null;
             }
+            
+            System.err.println("[救护车] 📍 移动到目标位置: " + targetPosition + 
+                               " 距离=" + String.format("%.1f", distance));
+            List<EntityID> path = pathPlanning.getResult(agentPosition, targetPosition);
+            if (path != null && !path.isEmpty()) {
+                return new ActionMove(path);
+            }
+            return null;
         }
         
-        // 处理障碍物目标
         if (targetEntity.getStandardURN() == BLOCKADE) {
             Blockade blockade = (Blockade) targetEntity;
             if (blockade.isPositionDefined()) {
@@ -232,8 +395,12 @@ public class ActionTransport extends ExtAction {
             }
         }
         
-        // 处理区域目标
         if (targetEntity instanceof Area) {
+            if (targetEntity instanceof Building && !isValidBuilding(targetEntity.getID())) {
+                this.target = null;
+                return null;
+            }
+            
             List<EntityID> path = pathPlanning.getResult(agentPosition, targetEntity.getID());
             if (path != null && !path.isEmpty()) {
                 return new ActionMove(path);
@@ -242,12 +409,9 @@ public class ActionTransport extends ExtAction {
         return null;
     }
     
-    /**
-     * 检查路径上是否有路障，若有则发送开路请求
-     */
-    private boolean hasBlockadeOnPath(EntityID from, EntityID to) {
+    private BlockadeInfo getFirstBlockadeOnPath(EntityID from, EntityID to) {
         List<EntityID> path = this.pathPlanning.getResult(from, to);
-        if (path == null) return true;
+        if (path == null) return new BlockadeInfo(true, null);
         
         for (EntityID step : path) {
             StandardEntity e = this.worldInfo.getEntity(step);
@@ -255,17 +419,13 @@ public class ActionTransport extends ExtAction {
                 Road road = (Road) e;
                 if (road.isBlockadesDefined() && !road.getBlockades().isEmpty()) {
                     requestClear(road);
-                    System.err.println("[救护车] 🚧 发现路障 " + step + "，请求警察清理");
-                    return true;
+                    return new BlockadeInfo(true, road.getID());
                 }
             }
         }
-        return false;
+        return new BlockadeInfo(false, null);
     }
     
-    /**
-     * 发送开路请求消息
-     */
     private void requestClear(Road road) {
         if (this.msgManager == null) return;
         
@@ -273,23 +433,13 @@ public class ActionTransport extends ExtAction {
         EntityID roadId = road.getID();
         
         MessageAmbulanceTeam msg = new MessageAmbulanceTeam(
-                true,
+                false,
                 agent,
                 MessageAmbulanceTeam.ACTION_MOVE,
                 roadId);
         this.msgManager.addMessage(msg);
-        
-        System.err.println("╔══════════════════════════════════════════════════════════════╗");
-        System.err.println("║  [救护车] 🚧 发现路障，发送开路请求！                         ║");
-        System.err.println("║  救护车 ID: " + agent.getID());
-        System.err.println("║  需要清理的道路: " + roadId);
-        System.err.println("║  路障数量: " + (road.isBlockadesDefined() ? road.getBlockades().size() : 0));
-        System.err.println("╚══════════════════════════════════════════════════════════════╝");
     }
 
-    /**
-     * 判断是否需要休息
-     */
     private boolean needRest(Human agent) {
         int hp = agent.getHP();
         int damage = agent.getDamage();
@@ -305,9 +455,6 @@ public class ActionTransport extends ExtAction {
         return damage >= this.thresholdRest || (activeTime + this.agentInfo.getTime()) < this.kernelTime;
     }
 
-    /**
-     * 前往避难所休息或卸载
-     */
     private Action calcRefugeAction(Human human, PathPlanning pathPlanning, Collection<EntityID> targets, boolean isUnload) {
         EntityID position = human.getPosition();
         Collection<EntityID> refuges = this.worldInfo.getEntityIDsOfType(REFUGE);
@@ -342,10 +489,28 @@ public class ActionTransport extends ExtAction {
         return firstResult != null ? new ActionMove(firstResult) : null;
     }
 
+    private static class BlockadeInfo {
+        boolean hasBlockade;
+        EntityID roadId;
+        
+        BlockadeInfo(boolean hasBlockade, EntityID roadId) {
+            this.hasBlockade = hasBlockade;
+            this.roadId = roadId;
+        }
+    }
+
     @Override
-    public ExtAction precompute(PrecomputeData precomputeData) { return this; }
+    public ExtAction precompute(PrecomputeData precomputeData) { 
+        return this; 
+    }
+    
     @Override
-    public ExtAction resume(PrecomputeData precomputeData) { return this; }
+    public ExtAction resume(PrecomputeData precomputeData) { 
+        return this; 
+    }
+    
     @Override
-    public ExtAction preparate() { return this; }
+    public ExtAction preparate() { 
+        return this; 
+    }
 }

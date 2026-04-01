@@ -134,7 +134,6 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
     }
 
     public int getClusterNumber() {
-        //The number of clusters
         return this.clusterSize;
     }
 
@@ -175,16 +174,32 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
         Random random = new Random();
 
         List<StandardEntity> entityList = new ArrayList<>(this.entities);
+        
+        // ========== 修复1：检查实体列表是否为空 ==========
+        if (entityList.isEmpty()) {
+            System.err.println("[SampleKMeans] 警告：没有找到任何实体，跳过聚类");
+            return;
+        }
+        
         this.centerList = new ArrayList<>(this.clusterSize);
         this.clusterEntitiesList = new HashMap<>(this.clusterSize);
 
-        //init list
+        // 确保 clusterSize 不超过实体数量
+        int actualClusterSize = Math.min(this.clusterSize, entityList.size());
+        if (actualClusterSize < this.clusterSize) {
+            System.err.println("[SampleKMeans] 警告：聚类数量 " + this.clusterSize + 
+                               " 大于实体数量 " + entityList.size() + "，调整为 " + actualClusterSize);
+            this.clusterSize = actualClusterSize;
+        }
+
+        // init list
         for (int index = 0; index < this.clusterSize; index++) {
             this.clusterEntitiesList.put(index, new ArrayList<>());
             this.centerList.add(index, entityList.get(0));
         }
         System.out.println("[" + this.getClass().getSimpleName() + "] Cluster : " + this.clusterSize);
-        //init center
+        
+        // init center
         for (int index = 0; index < this.clusterSize; index++) {
             StandardEntity centerEntity;
             do {
@@ -192,7 +207,8 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
             } while (this.centerList.contains(centerEntity));
             this.centerList.set(index, centerEntity);
         }
-        //calc center
+        
+        // calc center
         for (int i = 0; i < repeat; i++) {
             this.clusterEntitiesList.clear();
             for (int index = 0; index < this.clusterSize; index++) {
@@ -202,16 +218,28 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
                 StandardEntity tmp = this.getNearEntityByLine(this.worldInfo, this.centerList, entity);
                 this.clusterEntitiesList.get(this.centerList.indexOf(tmp)).add(entity);
             }
+            
             for (int index = 0; index < this.clusterSize; index++) {
+                // ========== 修复2：检查簇是否为空 ==========
+                List<StandardEntity> cluster = this.clusterEntitiesList.get(index);
+                if (cluster == null || cluster.isEmpty()) {
+                    // 如果簇为空，从其他簇随机取一个实体作为中心
+                    if (!entityList.isEmpty()) {
+                        StandardEntity fallback = entityList.get(random.nextInt(entityList.size()));
+                        this.centerList.set(index, fallback);
+                    }
+                    continue;
+                }
+                
                 int sumX = 0, sumY = 0;
-                for (StandardEntity entity : this.clusterEntitiesList.get(index)) {
+                for (StandardEntity entity : cluster) {
                     Pair<Integer, Integer> location = this.worldInfo.getLocation(entity);
                     sumX += location.first();
                     sumY += location.second();
                 }
-                int centerX = sumX / this.clusterEntitiesList.get(index).size();
-                int centerY = sumY / this.clusterEntitiesList.get(index).size();
-                StandardEntity center = this.getNearEntityByLine(this.worldInfo, this.clusterEntitiesList.get(index), centerX, centerY);
+                int centerX = sumX / cluster.size();  // 现在安全了
+                int centerY = sumY / cluster.size();
+                StandardEntity center = this.getNearEntityByLine(this.worldInfo, cluster, centerX, centerY);
                 if(center instanceof Area) {
                     this.centerList.set(index, center);
                 }
@@ -222,12 +250,12 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
                     this.centerList.set(index, this.worldInfo.getEntity(((Blockade) center).getPosition()));
                 }
             }
-            if  (scenarioInfo.isDebugMode()) { System.out.print("*"); }
+            if (scenarioInfo.isDebugMode()) { System.out.print("*"); }
         }
 
-        if  (scenarioInfo.isDebugMode()) { System.out.println(); }
+        if (scenarioInfo.isDebugMode()) { System.out.println(); }
 
-        //set entity
+        // set entity
         this.clusterEntitiesList.clear();
         for (int index = 0; index < this.clusterSize; index++) {
             this.clusterEntitiesList.put(index, new ArrayList<>());
@@ -265,8 +293,23 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
         this.initShortestPath(this.worldInfo);
         Random random = new Random();
         List<StandardEntity> entityList = new ArrayList<>(this.entities);
+        
+        // ========== 修复3：检查实体列表是否为空 ==========
+        if (entityList.isEmpty()) {
+            System.err.println("[SampleKMeans] 警告：没有找到任何实体，跳过聚类");
+            return;
+        }
+        
         this.centerList = new ArrayList<>(this.clusterSize);
         this.clusterEntitiesList = new HashMap<>(this.clusterSize);
+
+        // 确保 clusterSize 不超过实体数量
+        int actualClusterSize = Math.min(this.clusterSize, entityList.size());
+        if (actualClusterSize < this.clusterSize) {
+            System.err.println("[SampleKMeans] 警告：聚类数量 " + this.clusterSize + 
+                               " 大于实体数量 " + entityList.size() + "，调整为 " + actualClusterSize);
+            this.clusterSize = actualClusterSize;
+        }
 
         for (int index = 0; index < this.clusterSize; index++) {
             this.clusterEntitiesList.put(index, new ArrayList<>());
@@ -279,6 +322,7 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
             } while (this.centerList.contains(centerEntity));
             this.centerList.set(index, centerEntity);
         }
+        
         for (int i = 0; i < repeat; i++) {
             this.clusterEntitiesList.clear();
             for (int index = 0; index < this.clusterSize; index++) {
@@ -289,16 +333,27 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
                 this.clusterEntitiesList.get(this.centerList.indexOf(tmp)).add(entity);
             }
             for (int index = 0; index < this.clusterSize; index++) {
+                // ========== 修复4：检查簇是否为空 ==========
+                List<StandardEntity> cluster = this.clusterEntitiesList.get(index);
+                if (cluster == null || cluster.isEmpty()) {
+                    // 如果簇为空，从其他簇随机取一个实体作为中心
+                    if (!entityList.isEmpty()) {
+                        StandardEntity fallback = entityList.get(random.nextInt(entityList.size()));
+                        this.centerList.set(index, fallback);
+                    }
+                    continue;
+                }
+                
                 int sumX = 0, sumY = 0;
-                for (StandardEntity entity : this.clusterEntitiesList.get(index)) {
+                for (StandardEntity entity : cluster) {
                     Pair<Integer, Integer> location = this.worldInfo.getLocation(entity);
                     sumX += location.first();
                     sumY += location.second();
                 }
-                int centerX = sumX / clusterEntitiesList.get(index).size();
-                int centerY = sumY / clusterEntitiesList.get(index).size();
+                int centerX = sumX / cluster.size();  // 现在安全了
+                int centerY = sumY / cluster.size();
 
-                StandardEntity center = this.getNearEntity(this.worldInfo, this.clusterEntitiesList.get(index), centerX, centerY);
+                StandardEntity center = this.getNearEntity(this.worldInfo, cluster, centerX, centerY);
                 if (center instanceof Area) {
                     this.centerList.set(index, center);
                 } else if (center instanceof Human) {
@@ -307,10 +362,10 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
                     this.centerList.set(index, this.worldInfo.getEntity(((Blockade) center).getPosition()));
                 }
             }
-            if  (scenarioInfo.isDebugMode()) { System.out.print("*"); }
+            if (scenarioInfo.isDebugMode()) { System.out.print("*"); }
         }
 
-        if  (scenarioInfo.isDebugMode()) { System.out.println(); }
+        if (scenarioInfo.isDebugMode()) { System.out.println(); }
 
         this.clusterEntitiesList.clear();
         for (int index = 0; index < this.clusterSize; index++) {
@@ -345,8 +400,10 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
     }
 
     private void assignAgents(WorldInfo world, List<StandardEntity> agentList) {
+        if (agentList == null || agentList.isEmpty()) return;
+        
         int clusterIndex = 0;
-        while (agentList.size() > 0) {
+        while (agentList.size() > 0 && clusterIndex < this.clusterSize) {
             StandardEntity center = this.centerList.get(clusterIndex);
             StandardEntity agent = this.getNearAgent(world, agentList, center);
             this.clusterEntitiesList.get(clusterIndex).add(agent);
@@ -364,6 +421,8 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
     }
 
     private StandardEntity getNearEntityByLine(WorldInfo world, List<StandardEntity> srcEntityList, int targetX, int targetY) {
+        if (srcEntityList == null || srcEntityList.isEmpty()) return null;
+        
         StandardEntity result = null;
         for(StandardEntity entity : srcEntityList) {
             result = ((result != null) ? this.compareLineDistance(world, targetX, targetY, result, entity) : entity);
@@ -372,6 +431,8 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
     }
 
     private StandardEntity getNearAgent(WorldInfo worldInfo, List<StandardEntity> srcAgentList, StandardEntity targetEntity) {
+        if (srcAgentList == null || srcAgentList.isEmpty()) return null;
+        
         StandardEntity result = null;
         for (StandardEntity agent : srcAgentList) {
             Human human = (Human)agent;
@@ -388,6 +449,8 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
     }
 
     private StandardEntity getNearEntity(WorldInfo worldInfo, List<StandardEntity> srcEntityList, int targetX, int targetY) {
+        if (srcEntityList == null || srcEntityList.isEmpty()) return null;
+        
         StandardEntity result = null;
         for (StandardEntity entity : srcEntityList) {
             result = (result != null) ? this.compareLineDistance(worldInfo, targetX, targetY, result, entity) : entity;
@@ -400,7 +463,6 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
         Point2D end = edge.getEnd();
         return new Point2D(((start.getX() + end.getX()) / 2.0D), ((start.getY() + end.getY()) / 2.0D));
     }
-
 
     private double getDistance(double fromX, double fromY, double toX, double toY) {
         double dx = fromX - toX;
@@ -433,6 +495,8 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
     }
 
     private StandardEntity getNearEntity(WorldInfo worldInfo, List<StandardEntity> srcEntityList, StandardEntity targetEntity) {
+        if (srcEntityList == null || srcEntityList.isEmpty()) return null;
+        
         StandardEntity result = null;
         for (StandardEntity entity : srcEntityList) {
             result = (result != null) ? this.comparePathDistance(worldInfo, targetEntity, result, entity) : entity;
@@ -478,7 +542,7 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
                 neighbours.get(next.getID()).addAll(areaNeighbours);
             }
         }
-        for (Map.Entry<EntityID, Set<EntityID>> graph : neighbours.entrySet()) {// fix graph
+        for (Map.Entry<EntityID, Set<EntityID>> graph : neighbours.entrySet()) {
             for (EntityID entityID : graph.getValue()) {
                 neighbours.get(entityID).add(graph.getKey());
             }
@@ -504,7 +568,7 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
                 break;
             }
             Collection<EntityID> neighbours = shortestPathGraph.get(next);
-            if (neighbours.isEmpty()) continue;
+            if (neighbours == null || neighbours.isEmpty()) continue;
 
             for (EntityID neighbour : neighbours) {
                 if (isGoal(neighbour, goals)) {
@@ -520,10 +584,8 @@ public class SampleKMeans extends adf.core.component.module.algorithm.Clustering
             }
         } while (!found && !open.isEmpty());
         if (!found) {
-            // No path
             return null;
         }
-        // Walk back from goal to start
         EntityID current = next;
         List<EntityID> path = new LinkedList<>();
         do {

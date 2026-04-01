@@ -53,7 +53,7 @@ public class ActionExtMove extends adf.core.component.extaction.ExtAction {
         else if (agentInfo.me().getStandardURN() == AMBULANCE_TEAM) agentName = "救护车";
         else if (agentInfo.me().getStandardURN() == POLICE_FORCE) agentName = "警车";
         
-        System.err.println("[ZCWL_2026] " + agentName + " ID:" + agentInfo.getID() + " 移动动作模块已加载");
+        //System.err.println("[ZCWL_2026] " + agentName + " ID:" + agentInfo.getID() + " 移动动作模块已加载");
     }
 
     @Override
@@ -176,8 +176,8 @@ public class ActionExtMove extends adf.core.component.extaction.ExtAction {
             else if (agent.getStandardURN() == AMBULANCE_TEAM) agentName = "救护车";
             else if (agent.getStandardURN() == POLICE_FORCE) agentName = "警车";
             
-            System.err.println("[ZCWL_2026] " + agentName + " ID:" + agent.getID() + 
-                               " 📍 移动到: " + this.target + ", 路径长度: " + path.size());
+            /*System.err.println("[ZCWL_2026] " + agentName + " ID:" + agent.getID() + 
+                               " 📍 移动到: " + this.target + ", 路径长度: " + path.size());*/
             this.result = new ActionMove(path);
         } else {
             System.err.println("[ZCWL_2026] 无法计算路径: 从 " + currentPos + " 到 " + this.target);
@@ -193,7 +193,11 @@ public class ActionExtMove extends adf.core.component.extaction.ExtAction {
         
         PoliceForce agent = (PoliceForce) this.agentInfo.me();
         EntityID victimId = victim.getID();
-        EntityID victimPosition = victim.getPosition();
+       if (!victim.isPositionDefined()) {
+    System.err.println("[警察] 被困者位置未定义，跳过发送");
+    return;
+}
+EntityID victimPosition = victim.getPosition();
         
         CommunicationMessage msg = null;
         if (victim instanceof Civilian) {

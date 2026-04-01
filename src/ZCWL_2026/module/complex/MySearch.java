@@ -2,7 +2,6 @@ package ZCWL_2026.module.complex;
 
 import adf.core.agent.communication.MessageManager;
 import adf.core.agent.communication.standard.bundle.information.MessageBuilding;
-import adf.core.agent.communication.standard.bundle.information.MessageCivilian;
 import adf.core.agent.develop.DevelopData;
 import adf.core.agent.info.AgentInfo;
 import adf.core.agent.info.ScenarioInfo;
@@ -19,48 +18,79 @@ import rescuecore2.worldmodel.EntityID;
 import java.util.*;
 import static rescuecore2.standard.entities.StandardEntityURN.*;
 
+/**
+ * 搜索模块 - 只负责搜索未探索建筑
+ * 
+ * 策略：
+ * 1. 优先探索本区域内的建筑
+ * 2. 本区域探索完成后，切换到全局探索
+ */
 public class MySearch extends Search {
+    
+    // ==================== 核心组件 ====================
     private PathPlanning pathPlanning;
     private Clustering clustering;
-    private EntityID result;
-    private Collection<EntityID> unsearchedBuildingIDs;
-    private Set<EntityID> searchedBuildings;
     private StandardEntityURN agentType;
     
-    // 救护车专用
-    private Set<EntityID> checkedBuildingsForVictims;
-    private EntityID pendingVictim;
-    private Set<EntityID> discoveredWaitingVictims;
-
-    // 本簇缓存
-    private Collection<EntityID> myClusterBuildings;
+    // ==================== 建筑搜索相关 ====================
+    private EntityID result;
+    private Set<EntityID> unsearchedBuildings;      // 当前要探索的建筑（可能是区域或全局）
+    private Set<EntityID> searchedBuildings;        // 已探索的建筑（全局记录）
+    
+    // ==================== 区域探索相关 ====================
+    private Set<EntityID> zoneBuildings;            // 本区域的所有建筑
+    private Set<EntityID> zoneUnsearched;           // 本区域内未探索的建筑
+    private Collection<EntityID> myClusterBuildings; // 聚类返回的实体ID（用于调试）
+    private boolean zoneCompleted;                  // 本区域是否已探索完成
+    private int zoneTotalCount;                     // 本区域建筑总数
+    
+    // ==================== 状态 ====================
+    private boolean initialized;
+    private int lastLogTime;
 
     public MySearch(AgentInfo ai, WorldInfo wi, ScenarioInfo si,
                     ModuleManager moduleManager, DevelopData developData) {
         super(ai, wi, si, moduleManager, developData);
 
-        this.unsearchedBuildingIDs = new HashSet<>();
+        this.unsearchedBuildings = new HashSet<>();
         this.searchedBuildings = new HashSet<>();
-        this.checkedBuildingsForVictims = new HashSet<>();
-        this.discoveredWaitingVictims = new HashSet<>();
-        this.agentType = ai.me().getStandardURN();
-        this.pendingVictim = null;
+        this.zoneBuildings = new HashSet<>();
+        this.zoneUnsearched = new HashSet<>();
         this.myClusterBuildings = new ArrayList<>();
+        this.agentType = ai.me().getStandardURN();
+        this.result = null;
+        this.initialized = false;
+        this.zoneCompleted = false;
+        this.zoneTotalCount = 0;
+        this.lastLogTime = 0;
 
+        // 根据智能体类型加载模块
         StandardEntityURN agentURN = ai.me().getStandardURN();
         switch (si.getMode()) {
             case PRECOMPUTATION_PHASE:
             case PRECOMPUTED:
             case NON_PRECOMPUTE:
                 if (agentURN == AMBULANCE_TEAM) {
-                    this.pathPlanning = moduleManager.getModule("MySearch.PathPlanning.Ambulance", "ZCWL_2026.module.algorithm.PathPlanning");
-                    this.clustering = moduleManager.getModule("MySearch.Clustering.Ambulance", "ZCWL_2026.module.algorithm.SampleKMeans");
+                    this.pathPlanning = moduleManager.getModule(
+                        "MySearch.PathPlanning.Ambulance", 
+                        "ZCWL_2026.module.algorithm.PathPlanning");
+                    this.clustering = moduleManager.getModule(
+                        "MySearch.Clustering.Ambulance", 
+                        "ZCWL_2026.module.algorithm.SampleKMeans");
                 } else if (agentURN == FIRE_BRIGADE) {
-                    this.pathPlanning = moduleManager.getModule("MySearch.PathPlanning.Fire", "ZCWL_2026.module.algorithm.PathPlanning");
-                    this.clustering = moduleManager.getModule("MySearch.Clustering.Fire", "ZCWL_2026.module.algorithm.SampleKMeans");
+                    this.pathPlanning = moduleManager.getModule(
+                        "MySearch.PathPlanning.Fire", 
+                        "ZCWL_2026.module.algorithm.PathPlanning");
+                    this.clustering = moduleManager.getModule(
+                        "MySearch.Clustering.Fire", 
+                        "ZCWL_2026.module.algorithm.SampleKMeans");
                 } else if (agentURN == POLICE_FORCE) {
-                    this.pathPlanning = moduleManager.getModule("MySearch.PathPlanning.Police", "ZCWL_2026.module.algorithm.PathPlanning");
-                    this.clustering = moduleManager.getModule("MySearch.Clustering.Police", "ZCWL_2026.module.algorithm.SampleKMeans");
+                    this.pathPlanning = moduleManager.getModule(
+                        "MySearch.PathPlanning.Police", 
+                        "ZCWL_2026.module.algorithm.PathPlanning");
+                    this.clustering = moduleManager.getModule(
+                        "MySearch.Clustering.Police", 
+                        "ZCWL_2026.module.algorithm.SampleKMeans");
                 }
                 break;
         }
@@ -73,282 +103,269 @@ public class MySearch extends Search {
         else if (agentURN == AMBULANCE_TEAM) agentName = "救护车";
         else if (agentURN == POLICE_FORCE) agentName = "警车";
         
-        System.err.println("[ZCWL_2026] " + agentName + " ID:" + ai.getID() + " 搜索模块已加载");
+        System.err.println("[MySearch] " + agentName + " ID:" + ai.getID() + " 建筑搜索模块已加载（区域优先策略）");
+    }
+    
+    /**
+     * 初始化区域建筑列表
+     */
+    private void initZoneBuildings() {
+        this.zoneBuildings.clear();
+        this.zoneUnsearched.clear();
+        
+        if (this.clustering != null) {
+            try {
+                // 先确保聚类已经计算
+                this.clustering.calc();
+                
+                int clusterIndex = this.clustering.getClusterIndex(this.agentInfo.getID());
+                if (clusterIndex >= 0) {
+                    // 使用 getClusterEntityIDs 获取簇内的实体ID列表
+                    Collection<EntityID> clusterIds = this.clustering.getClusterEntityIDs(clusterIndex);
+                    if (clusterIds != null && !clusterIds.isEmpty()) {
+                        this.myClusterBuildings = new ArrayList<>(clusterIds);
+                        for (EntityID id : this.myClusterBuildings) {
+                            StandardEntity entity = this.worldInfo.getEntity(id);
+                            // 只添加建筑类型，且不是避难所
+                            if (entity instanceof Building && entity.getStandardURN() != REFUGE) {
+                                this.zoneBuildings.add(id);
+                                this.zoneUnsearched.add(id);
+                            }
+                        }
+                        this.zoneTotalCount = this.zoneBuildings.size();
+                        System.err.println("[MySearch] 聚类返回实体数: " + this.myClusterBuildings.size() +
+                                           ", 本区域建筑数: " + this.zoneTotalCount);
+                        return;
+                    }
+                }
+            } catch (Exception e) {
+                System.err.println("[MySearch] 聚类获取失败: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+        
+        // 如果聚类失败，本区域为空
+        this.zoneTotalCount = 0;
+        System.err.println("[MySearch] 无法获取本区域建筑，将直接使用全局探索");
+    }
+    
+    /**
+     * 更新区域探索状态（从已探索建筑中移除）
+     */
+    private void updateZoneProgress() {
+        if (zoneCompleted) return;
+        
+        int beforeCount = zoneUnsearched.size();
+        
+        // 从本区域未探索中移除已探索的建筑
+        for (EntityID searched : searchedBuildings) {
+            zoneUnsearched.remove(searched);
+        }
+        
+        int afterCount = zoneUnsearched.size();
+        if (beforeCount != afterCount && zoneTotalCount > 0) {
+            int remaining = zoneUnsearched.size();
+            int explored = zoneTotalCount - remaining;
+            System.err.println("[MySearch] 区域探索进度: " + explored + "/" + zoneTotalCount);
+        }
+        
+        // 检查是否完成
+        if (zoneUnsearched.isEmpty() && zoneTotalCount > 0 && !zoneCompleted) {
+            zoneCompleted = true;
+            System.err.println("╔══════════════════════════════════════════════════════════════╗");
+            System.err.println("║  [MySearch] 🎉 本区域探索完成！共探索 " + zoneTotalCount + " 个建筑     ║");
+            System.err.println("║  切换到全局探索模式                                          ║");
+            System.err.println("╚══════════════════════════════════════════════════════════════╝");
+        }
+    }
+    
+    /**
+     * 更新当前要探索的建筑列表（根据策略）
+     */
+    private void updateCurrentTargets() {
+        if (!zoneCompleted && zoneTotalCount > 0) {
+            // 区域模式：探索本区域内未探索的建筑
+            this.unsearchedBuildings.clear();
+            this.unsearchedBuildings.addAll(this.zoneUnsearched);
+        } else if (zoneCompleted || zoneTotalCount == 0) {
+            // 全局模式：探索所有未探索的建筑
+            if (this.unsearchedBuildings.isEmpty()) {
+                initFullMapBuildings();
+                // 移除已探索的
+                this.unsearchedBuildings.removeAll(this.searchedBuildings);
+            }
+        }
+    }
+    
+    /**
+     * 初始化全图建筑列表
+     */
+    private void initFullMapBuildings() {
+        this.unsearchedBuildings.clear();
+        for (StandardEntity entity : this.worldInfo.getEntitiesOfType(
+                BUILDING, GAS_STATION, AMBULANCE_CENTRE, FIRE_STATION, POLICE_OFFICE)) {
+            if (entity.getStandardURN() != REFUGE) {
+                this.unsearchedBuildings.add(entity.getID());
+            }
+        }
+        System.err.println("[MySearch] 全图建筑总数: " + this.unsearchedBuildings.size());
+    }
+    
+    /**
+     * 初始化（在第一次使用时调用）
+     */
+    private void initialize() {
+        if (initialized) return;
+        
+        // 初始化区域建筑
+        initZoneBuildings();
+        
+        // 初始化全图建筑（备用）
+        initFullMapBuildings();
+        
+        // 根据策略设置当前目标
+        updateCurrentTargets();
+        
+        initialized = true;
+        System.err.println("[MySearch] 初始化完成，当前模式: " + 
+                           (zoneTotalCount > 0 ? "区域优先（" + zoneTotalCount + "个建筑）" : "全局探索"));
     }
 
     @Override
     public Search updateInfo(MessageManager messageManager) {
         super.updateInfo(messageManager);
         if (this.getCountUpdateInfo() >= 2) return this;
-
+        
+        int currentTime = this.agentInfo.getTime();
+        
+        // 如果还没初始化，先初始化
+        if (!initialized) {
+            initialize();
+        }
+        
         // 从消息中同步已探索建筑
         for (CommunicationMessage message : messageManager.getReceivedMessageList(MessageBuilding.class)) {
             MessageBuilding mb = (MessageBuilding) message;
             this.searchedBuildings.add(mb.getBuildingID());
-            this.unsearchedBuildingIDs.remove(mb.getBuildingID());
-        }
-
-        // 移除已探索建筑
-        this.unsearchedBuildingIDs.removeAll(this.searchedBuildings);
-        this.unsearchedBuildingIDs.removeAll(this.worldInfo.getChanged().getChangedEntities());
-
-        if (this.unsearchedBuildingIDs.isEmpty()) {
-            this.reset();
-            this.unsearchedBuildingIDs.removeAll(this.searchedBuildings);
         }
         
-        // 救护车专用：接收紧急装载请求
-        if (this.agentType == AMBULANCE_TEAM) {
-            for (CommunicationMessage message : messageManager.getReceivedMessageList(MessageCivilian.class)) {
-                MessageCivilian mc = (MessageCivilian) message;
-                if (mc.isDamageDefined() && mc.getDamage() > 0 && 
-                    (!mc.isBuriednessDefined() || mc.getBuriedness() == 0)) {
-                    this.pendingVictim = mc.getAgentID();
-                    System.err.println("╔══════════════════════════════════════════════════════════════╗");
-                    System.err.println("║  [救护车搜索] 🚨 收到紧急装载请求！                           ║");
-                    System.err.println("║  平民: " + this.pendingVictim + " 需要立即装载                  ║");
-                    System.err.println("╚══════════════════════════════════════════════════════════════╝");
-                }
+        // 从世界变化中同步已探索建筑
+        for (EntityID changedId : this.worldInfo.getChanged().getChangedEntities()) {
+            StandardEntity entity = this.worldInfo.getEntity(changedId);
+            if (entity instanceof Building) {
+                this.searchedBuildings.add(changedId);
+            }
+        }
+        
+        // 更新区域探索进度
+        updateZoneProgress();
+        
+        // 更新当前目标列表
+        updateCurrentTargets();
+        
+        // 从当前目标中移除已探索的
+        this.unsearchedBuildings.removeAll(this.searchedBuildings);
+        
+        // 定期输出日志（每50步）
+        if (currentTime - lastLogTime > 50) {
+            lastLogTime = currentTime;
+            String agentName = (this.agentType == FIRE_BRIGADE) ? "消防车" :
+                              (this.agentType == AMBULANCE_TEAM) ? "救护车" : "警车";
+            
+            if (!zoneCompleted && zoneTotalCount > 0) {
+                int remaining = zoneUnsearched.size();
+                int explored = zoneTotalCount - remaining;
+                System.err.println("[MySearch] " + agentName + " 区域探索: " + 
+                                   explored + "/" + zoneTotalCount + "，剩余=" + remaining);
+            } else if (zoneCompleted) {
+                System.err.println("[MySearch] " + agentName + " 全局探索，剩余建筑数: " + 
+                                   this.unsearchedBuildings.size());
             }
         }
         
         return this;
-    }
-
-    /**
-     * 检查当前位置附近是否有等待装载的平民（救护车专用）
-     */
-    private EntityID checkNearbyWaitingVictim(EntityID position) {
-        if (this.agentType != AMBULANCE_TEAM) return null;
-        
-        Collection<StandardEntity> entitiesInRange = this.worldInfo.getObjectsInRange(position, 1000);
-        EntityID nearest = null;
-        double minDist = Double.MAX_VALUE;
-        
-        for (StandardEntity e : entitiesInRange) {
-            if (e instanceof Civilian) {
-                Civilian civilian = (Civilian) e;
-                if (civilian.isPositionDefined() && civilian.isDamageDefined() && civilian.getDamage() > 0 &&
-                    (!civilian.isBuriednessDefined() || civilian.getBuriedness() == 0)) {
-                    StandardEntity posEntity = this.worldInfo.getEntity(civilian.getPosition());
-                    if (posEntity instanceof Road) {
-                        double dist = this.worldInfo.getDistance(position, civilian.getPosition());
-                        if (dist < minDist) {
-                            minDist = dist;
-                            nearest = civilian.getID();
-                        }
-                        if (!discoveredWaitingVictims.contains(civilian.getID())) {
-                            System.err.println("╔══════════════════════════════════════════════════════════════╗");
-                            System.err.println("║  [救护车搜索] 🚑 发现道路上等待装载的平民！                  ║");
-                            System.err.println("║  平民 ID: " + civilian.getID() + " 伤害=" + civilian.getDamage());
-                            System.err.println("║  位置: " + civilian.getPosition() + " (道路)");
-                            System.err.println("╚══════════════════════════════════════════════════════════════╝");
-                            discoveredWaitingVictims.add(civilian.getID());
-                        }
-                    }
-                }
-            }
-        }
-        return nearest;
     }
 
     @Override
     public Search calc() {
         this.result = null;
         
-        // 救护车优先处理紧急装载
-        if (this.agentType == AMBULANCE_TEAM) {
-            EntityID waitingVictim = checkNearbyWaitingVictim(this.agentInfo.getPosition());
-            if (waitingVictim != null) {
-                this.pendingVictim = waitingVictim;
-                this.result = waitingVictim;
-                System.err.println("[救护车搜索] 🚑 发现道路上等待装载的平民，直接返回ID: " + waitingVictim);
-                return this;
-            }
-            if (this.pendingVictim != null) {
-                Human victim = (Human) this.worldInfo.getEntity(this.pendingVictim);
-                if (victim != null && victim.isHPDefined() && victim.getHP() > 0 &&
-                    victim.isDamageDefined() && victim.getDamage() > 0 &&
-                    (!victim.isBuriednessDefined() || victim.getBuriedness() == 0)) {
-                    if (victim.isPositionDefined()) {
-                        this.result = victim.getPosition();
-                        System.err.println("[救护车搜索] 🚑 紧急装载任务优先，前往位置: " + this.result + " (平民ID: " + this.pendingVictim + ")");
-                        return this;
-                    }
-                }
-                this.pendingVictim = null;
+        // 如果还没初始化，先初始化
+        if (!initialized) {
+            initialize();
+        }
+        
+        // 如果没有未探索建筑，尝试重新初始化
+        if (this.unsearchedBuildings.isEmpty()) {
+            // 如果区域模式已完成，重新从全图获取
+            if (zoneCompleted || zoneTotalCount == 0) {
+                initFullMapBuildings();
+                this.unsearchedBuildings.removeAll(this.searchedBuildings);
+            } else {
+                // 区域模式还有未探索建筑但列表为空，重新从区域获取
+                this.unsearchedBuildings.addAll(this.zoneUnsearched);
             }
         }
         
-        // 如果当前目标已被探索，放弃
-        if (this.result != null && this.searchedBuildings.contains(this.result)) {
-            System.err.println("[MySearch] 当前目标 " + this.result + " 已被其他智能体探索，重新选择");
-            this.result = null;
-        }
-        
-        // 已有目标且可达，直接返回
-        if (this.result != null && isReachable(this.result)) {
+        if (this.unsearchedBuildings.isEmpty()) {
             return this;
         }
         
-        // 寻找最近的未探索建筑（优先本簇）
-        this.result = findNearestReachableBuilding();
+        // 寻找最近的可达建筑
+        EntityID currentPos = this.agentInfo.getPosition();
+        EntityID nearest = null;
+        int minDistance = Integer.MAX_VALUE;
         
-        // 救护车专用：检查建筑内受伤平民
-        if (this.agentType == AMBULANCE_TEAM && this.result != null) {
-            EntityID victimInBuilding = checkBuildingForInjured(this.result);
-            if (victimInBuilding != null) {
-                this.pendingVictim = victimInBuilding;
-                this.result = null;
-                System.err.println("[救护车搜索] 🚑 在建筑内发现受伤平民: " + victimInBuilding);
-                return this;
+        for (EntityID buildingId : this.unsearchedBuildings) {
+            // 跳过已探索的
+            if (this.searchedBuildings.contains(buildingId)) continue;
+            
+            // 检查是否可达
+            List<EntityID> path = this.pathPlanning.getResult(currentPos, buildingId);
+            if (path != null && !path.isEmpty() && path.size() < minDistance) {
+                minDistance = path.size();
+                nearest = buildingId;
             }
         }
         
-        if (this.result != null) {
-            String agentName = "";
-            if (agentType == FIRE_BRIGADE) agentName = "消防车";
-            else if (agentType == AMBULANCE_TEAM) agentName = "救护车";
-            else if (agentType == POLICE_FORCE) agentName = "警车";
-            System.err.println("[MySearch] " + agentName + " ID:" + this.agentInfo.getID() + 
-                               " 搜索到未探索建筑: " + this.result);
-        }
-        
+        this.result = nearest;
         return this;
     }
 
     /**
-     * 检查建筑内是否有受伤平民（救护车专用）
+     * 获取本区域探索进度（用于外部查询）
      */
-    private EntityID checkBuildingForInjured(EntityID buildingId) {
-        if (this.agentType != AMBULANCE_TEAM) return null;
-        if (checkedBuildingsForVictims.contains(buildingId)) return null;
-        
-        StandardEntity entity = this.worldInfo.getEntity(buildingId);
-        if (!(entity instanceof Building)) return null;
-        
-        Collection<StandardEntity> entitiesInRange = this.worldInfo.getObjectsInRange(buildingId, 1000);
-        for (StandardEntity e : entitiesInRange) {
-            if (e instanceof Civilian) {
-                Civilian civilian = (Civilian) e;
-                if (civilian.isPositionDefined() && civilian.getPosition().equals(buildingId) &&
-                    civilian.isDamageDefined() && civilian.getDamage() > 0 &&
-                    (!civilian.isBuriednessDefined() || civilian.getBuriedness() == 0)) {
-                    System.err.println("╔══════════════════════════════════════════════════════════════╗");
-                    System.err.println("║  [救护车搜索] 🚑 在建筑 " + buildingId + " 内发现受伤平民！    ║");
-                    System.err.println("║  平民 ID: " + civilian.getID() + " 伤害=" + civilian.getDamage() + "      ║");
-                    System.err.println("╚══════════════════════════════════════════════════════════════╝");
-                    checkedBuildingsForVictims.add(buildingId);
-                    return civilian.getID();
-                }
-            }
-        }
-        checkedBuildingsForVictims.add(buildingId);
-        return null;
+    public int getZoneProgress() {
+        if (zoneTotalCount == 0) return 100;
+        int explored = zoneTotalCount - zoneUnsearched.size();
+        return (explored * 100) / zoneTotalCount;
+    }
+    
+    /**
+     * 是否已完成本区域探索
+     */
+    public boolean isZoneCompleted() {
+        return zoneCompleted;
+    }
+    
+    /**
+     * 获取当前模式名称
+     */
+    public String getCurrentMode() {
+        return (zoneCompleted || zoneTotalCount == 0) ? "全局探索" : "区域探索";
     }
 
     @Override
     public EntityID getTarget() {
-        if (this.agentType == AMBULANCE_TEAM && this.pendingVictim != null) {
-            return this.pendingVictim;
-        }
         return this.result;
-    }
-
-    /**
-     * 寻找最近的未探索建筑（优先本簇内，若本簇无则全图）
-     */
-    private EntityID findNearestReachableBuilding() {
-        EntityID currentPos = this.agentInfo.getPosition();
-        EntityID best = null;
-        int bestDist = Integer.MAX_VALUE;
-        
-        // 1. 优先在本簇内寻找
-        Set<EntityID> candidates = new HashSet<>();
-        if (this.myClusterBuildings != null && !this.myClusterBuildings.isEmpty()) {
-            // 只从本簇内筛选未探索且可达的建筑
-            for (EntityID b : this.myClusterBuildings) {
-                if (!this.searchedBuildings.contains(b) && this.unsearchedBuildingIDs.contains(b)) {
-                    candidates.add(b);
-                }
-            }
-        }
-        
-        // 2. 如果本簇内没有，则从全部未探索建筑中寻找
-        if (candidates.isEmpty()) {
-            candidates = new HashSet<>(this.unsearchedBuildingIDs);
-            candidates.removeAll(this.searchedBuildings);
-        }
-        
-        // 3. 按距离排序（通过路径长度）
-        for (EntityID buildingId : candidates) {
-            if (this.searchedBuildings.contains(buildingId)) continue; // 再次确认
-            if (!isReachable(buildingId)) continue;
-            List<EntityID> path = this.pathPlanning.getResult(currentPos, buildingId);
-            if (path != null && path.size() < bestDist) {
-                bestDist = path.size();
-                best = buildingId;
-            }
-        }
-        
-        return best;
-    }
-
-    private boolean isReachable(EntityID target) {
-        EntityID currentPos = this.agentInfo.getPosition();
-        List<EntityID> path = this.pathPlanning.getResult(currentPos, target);
-        return path != null && path.size() > 0;
-    }
-
-    private void reset() {
-        this.unsearchedBuildingIDs.clear();
-        
-        // 获取本簇建筑列表
-        if (this.clustering != null) {
-            int clusterIndex = this.clustering.getClusterIndex(this.agentInfo.getID());
-            Collection<StandardEntity> clusterEntities = this.clustering.getClusterEntities(clusterIndex);
-            if (clusterEntities != null && !clusterEntities.isEmpty()) {
-                this.myClusterBuildings = new ArrayList<>();
-                for (StandardEntity entity : clusterEntities) {
-                    if (entity instanceof Building && entity.getStandardURN() != REFUGE) {
-                        this.myClusterBuildings.add(entity.getID());
-                        if (!this.searchedBuildings.contains(entity.getID())) {
-                            this.unsearchedBuildingIDs.add(entity.getID());
-                        }
-                    }
-                }
-            }
-        }
-        
-        // 如果没有聚类或聚类为空，则添加全图建筑
-        if (this.myClusterBuildings == null || this.myClusterBuildings.isEmpty()) {
-            for (StandardEntity entity : this.worldInfo.getEntitiesOfType(BUILDING, GAS_STATION, AMBULANCE_CENTRE, FIRE_STATION, POLICE_OFFICE)) {
-                if (!this.searchedBuildings.contains(entity.getID())) {
-                    this.unsearchedBuildingIDs.add(entity.getID());
-                }
-            }
-        }
-        
-        // 清理救护车专用缓存
-        if (this.agentType == AMBULANCE_TEAM) {
-            this.checkedBuildingsForVictims.clear();
-            this.discoveredWaitingVictims.clear();
-        }
-        
-        String agentName = "";
-        if (agentType == FIRE_BRIGADE) agentName = "消防车";
-        else if (agentType == AMBULANCE_TEAM) agentName = "救护车";
-        else if (agentType == POLICE_FORCE) agentName = "警车";
-        System.err.println("[MySearch] " + agentName + " ID:" + this.agentInfo.getID() + 
-                           " 重置搜索列表，本簇建筑数=" + 
-                           (this.myClusterBuildings == null ? 0 : this.myClusterBuildings.size()) +
-                           ", 总未探索数=" + this.unsearchedBuildingIDs.size());
     }
 
     @Override
     public Search precompute(PrecomputeData precomputeData) {
         super.precompute(precomputeData);
         if (this.getCountPrecompute() >= 2) return this;
+        if (this.clustering != null) this.clustering.precompute(precomputeData);
+        if (this.pathPlanning != null) this.pathPlanning.precompute(precomputeData);
         return this;
     }
 
@@ -356,6 +373,8 @@ public class MySearch extends Search {
     public Search resume(PrecomputeData precomputeData) {
         super.resume(precomputeData);
         if (this.getCountResume() >= 2) return this;
+        if (this.clustering != null) this.clustering.resume(precomputeData);
+        if (this.pathPlanning != null) this.pathPlanning.resume(precomputeData);
         this.worldInfo.requestRollback();
         return this;
     }
@@ -364,6 +383,8 @@ public class MySearch extends Search {
     public Search preparate() {
         super.preparate();
         if (this.getCountPreparate() >= 2) return this;
+        if (this.clustering != null) this.clustering.preparate();
+        if (this.pathPlanning != null) this.pathPlanning.preparate();
         this.worldInfo.requestRollback();
         return this;
     }

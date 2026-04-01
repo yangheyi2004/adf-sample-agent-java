@@ -3,7 +3,6 @@ package ZCWL_2026.module.complex;
 import adf.core.component.communication.CommunicationMessage;
 import adf.core.agent.communication.MessageManager;
 import adf.core.agent.communication.standard.bundle.MessageUtil;
-import adf.core.agent.communication.standard.bundle.centralized.CommandAmbulance;
 import adf.core.agent.communication.standard.bundle.centralized.MessageReport;
 import adf.core.agent.communication.standard.bundle.information.*;
 import adf.core.agent.develop.DevelopData;
@@ -21,51 +20,47 @@ import static rescuecore2.standard.entities.StandardEntityURN.*;
 
 public class AmbulanceTargetAllocator extends adf.core.component.module.complex.AmbulanceTargetAllocator {
 
-    // 任务类型常量
-    public static final int TASK_TYPE_LOAD = 1;     // 装载（平民）
-    public static final int TASK_TYPE_RESCUE = 2;   // 治疗（非平民）
+    private static final int TASK_TYPE_LOAD = 1;
+    private static final int PRIORITY_FIRE_REPORT = -1;
+    private static final int PRIORITY_CIVILIAN = 0;
+    private static final int PRIORITY_URGENT = -2;
 
-    // 优先级常量（基于单位类型，数字越小优先级越高）
-    private static final int PRIORITY_TYPE_FIRE = 0;      // 消防员
-    private static final int PRIORITY_TYPE_POLICE = 1;    // 警察
-    private static final int PRIORITY_TYPE_AMBULANCE = 2; // 救护车
-    private static final int PRIORITY_TYPE_CIVILIAN = 3;  // 平民
-
-    // 强制装载最高优先级（覆盖类型优先级）
-    private static final int PRIORITY_FORCED_LOAD = 0;
-
-    private static final int MAX_AMBULANCE_PER_VICTIM = 3;  // 每个单位最多辆救护车
+    private static final int MAX_AMBULANCE_PER_VICTIM = 1;
+    private static final int TASK_TIMEOUT = 50;
+    private static final int URGENT_DAMAGE_THRESHOLD = 50;
+    private static final int ACTIVE_SCAN_INTERVAL = 5;
 
     private PathPlanning pathPlanning;
     
-    // 任务集合
-    private Set<EntityID> loadNowTasks;      // 平民装载任务
-    private Set<EntityID> rescueTasks;       // 非平民治疗任务
-    private Set<EntityID> forcedLoadTasks;   // 强制装载任务（消防员指派）
+    private Set<EntityID> civilianTasks;
+    private Set<EntityID> fireReportedTasks;
+    private Set<EntityID> urgentTasks;
     
-    private Map<EntityID, AmbulanceTeamInfo> ambulanceTeamInfoMap;
+    private Map<EntityID, AmbulanceTeamInfo> ambulanceInfoMap;
     
-    // 任务分配计数（区分装载和治疗）
-    private Map<EntityID, Integer> loadAssignCount;
-    private Map<EntityID, Integer> rescueAssignCount;
+    private Map<EntityID, Integer> taskAssignCount;
     private Set<EntityID> completedTasks;
+    private Map<EntityID, Integer> taskStartTime;
     
-    // 记录上一轮已发现的单位，避免重复日志
-    private Set<EntityID> lastLoadNowVictims;
-    private Set<EntityID> lastRescueTasks;
+    private Set<EntityID> invalidBuildings;
+    private Set<EntityID> victimsWaitingForLoad;
+    
+    private int lastScanTime;
 
     public AmbulanceTargetAllocator(AgentInfo ai, WorldInfo wi, ScenarioInfo si, 
                                      ModuleManager moduleManager, DevelopData developData) {
         super(ai, wi, si, moduleManager, developData);
-        this.loadNowTasks = new HashSet<>();
-        this.rescueTasks = new HashSet<>();
-        this.forcedLoadTasks = new HashSet<>();
-        this.ambulanceTeamInfoMap = new HashMap<>();
-        this.loadAssignCount = new HashMap<>();
-        this.rescueAssignCount = new HashMap<>();
+        
+        this.civilianTasks = new HashSet<>();
+        this.fireReportedTasks = new HashSet<>();
+        this.urgentTasks = new HashSet<>();
+        this.ambulanceInfoMap = new HashMap<>();
+        this.taskAssignCount = new HashMap<>();
         this.completedTasks = new HashSet<>();
-        this.lastLoadNowVictims = new HashSet<>();
-        this.lastRescueTasks = new HashSet<>();
+        this.taskStartTime = new HashMap<>();
+        this.invalidBuildings = new HashSet<>();
+        this.victimsWaitingForLoad = new HashSet<>();
+        this.lastScanTime = 0;
         
         switch (si.getMode()) {
             case PRECOMPUTATION_PHASE:
@@ -77,429 +72,531 @@ public class AmbulanceTargetAllocator extends adf.core.component.module.complex.
                 break;
         }
         
-        System.err.println("╔══════════════════════════════════════════════════════════════╗");
-        System.err.println("║  [救护车分配器] 已加载                                        ║");
-        System.err.println("║  任务: 平民装载，非平民治疗                                    ║");
-        System.err.println("║  优先级: 消防员(0) > 警察(1) > 救护车(2) > 平民(3)           ║");
-        System.err.println("║  策略: 只分配给空闲救护车（不打断）                            ║");
-        System.err.println("║  每个单位最多 " + MAX_AMBULANCE_PER_VICTIM + " 辆救护车         ║");
-        System.err.println("╚══════════════════════════════════════════════════════════════╝");
+        System.err.println("[救护车分配器] 已加载 - 优化版");
     }
 
-    @Override
-    public AmbulanceTargetAllocator resume(PrecomputeData precomputeData) {
-        super.resume(precomputeData);
-        if (this.getCountResume() >= 2) return this;
-        initAmbulanceInfo();
-        return this;
-    }
-
-    @Override
-    public AmbulanceTargetAllocator preparate() {
-        super.preparate();
-        if (this.getCountPrecompute() >= 2) return this;
-        initAmbulanceInfo();
-        return this;
-    }
-
-    private void initAmbulanceInfo() {
-        for (EntityID id : this.worldInfo.getEntityIDsOfType(AMBULANCE_TEAM)) {
-            this.ambulanceTeamInfoMap.put(id, new AmbulanceTeamInfo(id));
+    // ==================== 建筑有效性检查 ====================
+    
+    private boolean isValidBuilding(EntityID buildingId) {
+        if (buildingId == null) return false;
+        if (invalidBuildings.contains(buildingId)) return false;
+        
+        StandardEntity entity = this.worldInfo.getEntity(buildingId);
+        if (!(entity instanceof Building)) return true;
+        
+        Building building = (Building) entity;
+        if (!building.isXDefined() || !building.isYDefined()) {
+            invalidBuildings.add(buildingId);
+            return false;
         }
-        System.err.println("[救护车分配器] 初始化完成，救护车数量: " + ambulanceTeamInfoMap.size());
-    }
-
-    @Override
-    public Map<EntityID, EntityID> getResult() {
-        Map<EntityID, EntityID> result = new HashMap<>();
-        for (Map.Entry<EntityID, AmbulanceTeamInfo> e : ambulanceTeamInfoMap.entrySet()) {
-            AmbulanceTeamInfo info = e.getValue();
-            if (info.currentTask != null && !completedTasks.contains(info.currentTask)) {
-                result.put(e.getKey(), info.currentTask);
-            }
+        
+        int x = building.getX();
+        int y = building.getY();
+        if (Math.abs(x) <= 10 && Math.abs(y) <= 10) {
+            invalidBuildings.add(buildingId);
+            return false;
         }
-        return result;
-    }
-
-    /**
-     * 获取指定救护车当前任务类型（供命令生成器使用）
-     */
-    public int getTaskType(EntityID ambulanceId) {
-        AmbulanceTeamInfo info = ambulanceTeamInfoMap.get(ambulanceId);
-        return info != null ? info.currentTaskType : -1;
-    }
-
-    @Override
-    public AmbulanceTargetAllocator calc() {
-        scanAllHumans();
-        checkCompletedTasks();
-        assignTasksByPriority();
-        return this;
+        
+        return true;
     }
     
-    // ========== 扫描所有人类单位 ==========
-    private void scanAllHumans() {
-        Set<EntityID> currentLoadVictims = new HashSet<>();
-        Set<EntityID> currentRescueTasks = new HashSet<>();
+    private boolean isValidPositionEntity(EntityID positionId) {
+        if (positionId == null) return false;
+        StandardEntity entity = this.worldInfo.getEntity(positionId);
+        if (entity == null) return false;
+        if (entity instanceof Building) return isValidBuilding(positionId);
+        if (entity instanceof Road) {
+            Road road = (Road) entity;
+            return road.isXDefined() && road.isYDefined();
+        }
+        return true;
+    }
+    
+    private boolean isInRefuge(Human human) {
+        if (!human.isPositionDefined()) return false;
+        EntityID pos = human.getPosition();
+        if (pos == null) return false;
+        StandardEntity posEntity = this.worldInfo.getEntity(pos);
+        return posEntity != null && posEntity.getStandardURN() == REFUGE;
+    }
+    
+    private boolean isVictimAlreadyLoaded(EntityID victimId) {
+        for (AmbulanceTeamInfo info : ambulanceInfoMap.values()) {
+            if (info.transportHuman != null && info.transportHuman.equals(victimId)) {
+                return true;
+            }
+        }
+        return victimsWaitingForLoad.contains(victimId);
+    }
+    
+    // ==================== 关键修复：检查是否为救护车 ====================
+    
+    /**
+     * 检查ID是否为救护车（禁止救护车装载自己）
+     */
+    private boolean isAmbulanceTeam(EntityID id) {
+        if (id == null) return false;
+        StandardEntity entity = this.worldInfo.getEntity(id);
+        return entity instanceof AmbulanceTeam;
+    }
+    
+    /**
+     * 验证目标是否为有效的平民
+     */
+    private boolean isValidTarget(EntityID target) {
+        if (target == null) {
+            System.err.println("[救护车分配器] ❌ 目标为null");
+            return false;
+        }
         
-        for (StandardEntity entity : this.worldInfo.getEntitiesOfType(CIVILIAN, POLICE_FORCE, FIRE_BRIGADE, AMBULANCE_TEAM)) {
-            if (!(entity instanceof Human)) continue;
+        StandardEntity entity = this.worldInfo.getEntity(target);
+        if (entity == null) {
+            System.err.println("[救护车分配器] ❌ 目标 " + target + " 不存在");
+            return false;
+        }
+        
+        // ========== 关键修复：禁止救护车装载自己 ==========
+        if (entity instanceof AmbulanceTeam) {
+            System.err.println("[救护车分配器] ❌ 错误！试图分配救护车自己作为目标！");
+            System.err.println("  救护车ID: " + target);
+            return false;
+        }
+        
+        // 必须是平民
+        if (!(entity instanceof Civilian)) {
+            System.err.println("[救护车分配器] ❌ 目标 " + target + " 不是平民，类型: " + 
+                               entity.getClass().getSimpleName());
+            return false;
+        }
+        
+        return true;
+    }
+
+    // ==================== 增强版平民扫描 ====================
+    
+    private void scanCivilians() {
+        Set<EntityID> newCivilians = new HashSet<>();
+        Set<EntityID> newUrgent = new HashSet<>();
+        
+        for (StandardEntity entity : this.worldInfo.getEntitiesOfType(CIVILIAN)) {
             Human human = (Human) entity;
             EntityID victimId = human.getID();
+            
+            // ========== 跳过救护车自己 ==========
+            if (isAmbulanceTeam(victimId)) {
+                continue;
+            }
+            
+            if (completedTasks.contains(victimId)) continue;
+            if (isVictimAlreadyLoaded(victimId)) {
+                completedTasks.add(victimId);
+                continue;
+            }
+            
+            if (!human.isPositionDefined()) continue;
+            
+            EntityID pos = human.getPosition();
+            if (pos == null || !isValidPositionEntity(pos)) continue;
             
             if (human.isHPDefined() && human.getHP() == 0) {
                 completedTasks.add(victimId);
                 continue;
             }
             
-            boolean isBuried = (human.isBuriednessDefined() && human.getBuriedness() > 0);
-            boolean hasDamage = (human.isDamageDefined() && human.getDamage() > 0);
-            boolean isPositionDefined = human.isPositionDefined();
+            boolean isBuried = human.isBuriednessDefined() && human.getBuriedness() > 0;
+            boolean hasDamage = human.isDamageDefined() && human.getDamage() > 0;
+            boolean isInRefuge = isInRefuge(human);
             
-            if (!isBuried && isPositionDefined) {
-                if (human.getStandardURN() == CIVILIAN) {
-                    // 平民：装载任务
-                    currentLoadVictims.add(victimId);
-                    if (!lastLoadNowVictims.contains(victimId)) {
-                        System.err.println("╔══════════════════════════════════════════════════════════════╗");
-                        System.err.println("║  [救护车分配器] 🚨 主动扫描发现已挖出平民！                  ║");
-                        System.err.println("║  平民: " + victimId + " 伤害=" + human.getDamage());
-                        System.err.println("║  位置: " + human.getPosition());
-                        System.err.println("╚══════════════════════════════════════════════════════════════╝");
-                    }
-                } else if (hasDamage) {
-                    // 非平民且受伤：治疗任务
-                    currentRescueTasks.add(victimId);
-                    if (!lastRescueTasks.contains(victimId)) {
-                        String typeName = getTypeName(human.getStandardURN());
-                        System.err.println("╔══════════════════════════════════════════════════════════════╗");
-                        System.err.println("║  [救护车分配器] 🏥 主动扫描发现受伤非平民！                  ║");
-                        System.err.println("║  单位: " + victimId + " (" + typeName + ") 伤害=" + human.getDamage());
-                        System.err.println("║  位置: " + human.getPosition());
-                        System.err.println("╚══════════════════════════════════════════════════════════════╝");
-                    }
-                }
-                // 非平民无伤害：忽略
-            }
-        }
-        
-        loadNowTasks.clear();
-        loadNowTasks.addAll(currentLoadVictims);
-        rescueTasks.clear();
-        rescueTasks.addAll(currentRescueTasks);
-        forcedLoadTasks.removeAll(currentLoadVictims);
-        forcedLoadTasks.removeAll(currentRescueTasks);
-        
-        lastLoadNowVictims.clear();
-        lastLoadNowVictims.addAll(currentLoadVictims);
-        lastRescueTasks.clear();
-        lastRescueTasks.addAll(currentRescueTasks);
-        
-        if (!currentLoadVictims.isEmpty()) {
-            System.err.println("[救护车分配器] 当前有 " + currentLoadVictims.size() + " 个平民等待装载");
-        }
-        if (!currentRescueTasks.isEmpty()) {
-            System.err.println("[救护车分配器] 当前有 " + currentRescueTasks.size() + " 个非平民等待治疗");
-        }
-    }
-
-    // ========== 核心分配逻辑 ==========
-    
-    private EntityID findBestIdleAmbulance(EntityID targetPos) {
-        EntityID bestAmbulance = null;
-        double bestDistance = Double.MAX_VALUE;
-        int idleCount = 0;
-        
-        for (Map.Entry<EntityID, AmbulanceTeamInfo> entry : ambulanceTeamInfoMap.entrySet()) {
-            EntityID ambulanceId = entry.getKey();
-            AmbulanceTeamInfo info = entry.getValue();
-            if (info.currentTask != null) continue;
-            
-            idleCount++;
-            if (!isReachable(ambulanceId, targetPos)) continue;
-            
-            double distance = getDistance(ambulanceId, targetPos);
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                bestAmbulance = ambulanceId;
-            }
-        }
-        
-        if (bestAmbulance != null) {
-            System.err.println("[救护车分配器] ✅ 找到空闲救护车: " + bestAmbulance + 
-                               " 距离=" + (int)bestDistance + " (空闲总数=" + idleCount + ")");
-        } else {
-            System.err.println("[救护车分配器] ❌ 无空闲救护车 (空闲总数=" + idleCount + ")");
-        }
-        return bestAmbulance;
-    }
-    
-    private void assignTasksByPriority() {
-        List<Task> allTasks = new ArrayList<>();
-        
-        // 强制装载（优先级0）
-        for (EntityID target : forcedLoadTasks) {
-            if (completedTasks.contains(target)) continue;
-            Task task = validateTask(target, true);
-            if (task != null) allTasks.add(task);
-        }
-        
-        // 治疗任务（非平民）
-        for (EntityID target : rescueTasks) {
-            if (completedTasks.contains(target)) continue;
-            Task task = validateTask(target, false);
-            if (task != null) allTasks.add(task);
-        }
-        
-        // 装载任务（平民）
-        for (EntityID target : loadNowTasks) {
-            if (completedTasks.contains(target)) continue;
-            Task task = validateTask(target, false);
-            if (task != null) allTasks.add(task);
-        }
-        
-        allTasks.sort(Comparator.comparingInt(t -> t.priority));
-        
-        System.err.println("[救护车分配器] 开始分配任务，待分配任务数: " + allTasks.size());
-        for (Task task : allTasks) {
-            String priorityName = getPriorityName(task.priority);
-            String taskTypeName = (task.taskType == TASK_TYPE_LOAD) ? "装载" : "治疗";
-            System.err.println("[救护车分配器]   任务: " + task.target + 
-                               " 类型=" + getTypeName(task.type) +
-                               " 任务类型=" + taskTypeName +
-                               " 优先级=" + task.priority + "(" + priorityName + ")");
-        }
-        
-        Set<EntityID> assignedTasks = new HashSet<>();
-        
-        for (Task task : allTasks) {
-            if (assignedTasks.contains(task.target)) continue;
-            
-            int currentCount = getTaskAssignCount(task.target, task.taskType);
-            if (currentCount >= MAX_AMBULANCE_PER_VICTIM) {
-                System.err.println("[救护车分配器] 任务 " + task.target + " 已满 (" + currentCount + "/" + MAX_AMBULANCE_PER_VICTIM + ")，跳过");
+            if (isInRefuge) {
+                completedTasks.add(victimId);
                 continue;
             }
             
-            EntityID bestAmbulance = findBestIdleAmbulance(task.position);
-            if (bestAmbulance != null) {
-                assignTaskToAmbulance(bestAmbulance, task.target, task.priority, task.taskType);
-                assignedTasks.add(task.target);
-                incrementTaskAssignCount(task.target, task.taskType);
+            if (!isBuried && hasDamage) {
+                newCivilians.add(victimId);
                 
-                String priorityName = getPriorityName(task.priority);
-                String taskTypeName = (task.taskType == TASK_TYPE_LOAD) ? "装载" : "治疗";
-                System.err.println("╔══════════════════════════════════════════════════════════════╗");
-                System.err.println("║  [救护车分配器] 📍 分配任务！                                 ║");
-                System.err.println("║  救护车: " + bestAmbulance);
-                System.err.println("║  目标: " + task.target + " (" + getTypeName(task.type) + ")");
-                System.err.println("║  任务类型: " + taskTypeName);
-                System.err.println("║  优先级: " + task.priority + "(" + priorityName + ")");
-                System.err.println("╚══════════════════════════════════════════════════════════════╝");
+                if (human.getDamage() > URGENT_DAMAGE_THRESHOLD) {
+                    newUrgent.add(victimId);
+                }
             }
         }
         
-        // 清理已分配的任务
-        loadNowTasks.removeAll(assignedTasks);
-        rescueTasks.removeAll(assignedTasks);
-        forcedLoadTasks.removeAll(assignedTasks);
-    }
-
-    private int getTaskAssignCount(EntityID target, int taskType) {
-        if (taskType == TASK_TYPE_LOAD) {
-            return loadAssignCount.getOrDefault(target, 0);
-        } else {
-            return rescueAssignCount.getOrDefault(target, 0);
-        }
-    }
-    
-    private void incrementTaskAssignCount(EntityID target, int taskType) {
-        if (taskType == TASK_TYPE_LOAD) {
-            loadAssignCount.put(target, loadAssignCount.getOrDefault(target, 0) + 1);
-        } else {
-            rescueAssignCount.put(target, rescueAssignCount.getOrDefault(target, 0) + 1);
-        }
-    }
-    
-    private void decrementTaskAssignCount(EntityID target, int taskType) {
-        if (taskType == TASK_TYPE_LOAD) {
-            int count = loadAssignCount.getOrDefault(target, 0);
-            if (count > 0) loadAssignCount.put(target, count - 1);
-        } else {
-            int count = rescueAssignCount.getOrDefault(target, 0);
-            if (count > 0) rescueAssignCount.put(target, count - 1);
+        this.urgentTasks.addAll(newUrgent);
+        this.civilianTasks.addAll(newCivilians);
+        this.civilianTasks.removeAll(this.fireReportedTasks);
+        
+        if (!newCivilians.isEmpty()) {
+            System.err.println("[救护车分配器] 扫描到 " + newCivilians.size() + " 个平民等待装载");
         }
     }
     
     /**
-     * 验证任务有效性，并返回带有优先级的 Task 对象
-     * @param target 目标ID
-     * @param isForcedLoad 是否是强制装载（消防员指派）
+     * 主动扫描平民（修复漏救问题）
      */
-    private Task validateTask(EntityID target, boolean isForcedLoad) {
+    private void activeScanForVictims() {
+        int currentTime = this.agentInfo.getTime();
+        if (currentTime - lastScanTime < ACTIVE_SCAN_INTERVAL) return;
+        lastScanTime = currentTime;
+        
+        System.err.println("[救护车分配器] 🔍 主动扫描所有平民...");
+        
+        int foundCount = 0;
+        
+        for (StandardEntity entity : this.worldInfo.getEntitiesOfType(CIVILIAN)) {
+            Human human = (Human) entity;
+            EntityID victimId = human.getID();
+            
+            // ========== 跳过救护车自己 ==========
+            if (isAmbulanceTeam(victimId)) {
+                continue;
+            }
+            
+            if (completedTasks.contains(victimId)) continue;
+            if (isVictimAlreadyLoaded(victimId)) {
+                completedTasks.add(victimId);
+                continue;
+            }
+            
+            if (!human.isPositionDefined()) continue;
+            
+            EntityID pos = human.getPosition();
+            if (pos == null || !isValidPositionEntity(pos)) continue;
+            
+            if (human.isHPDefined() && human.getHP() == 0) {
+                completedTasks.add(victimId);
+                continue;
+            }
+            
+            boolean isBuried = human.isBuriednessDefined() && human.getBuriedness() > 0;
+            boolean hasDamage = human.isDamageDefined() && human.getDamage() > 0;
+            boolean isInRefuge = isInRefuge(human);
+            
+            if (isInRefuge) {
+                completedTasks.add(victimId);
+                continue;
+            }
+            
+            if (!isBuried && hasDamage) {
+                if (!civilianTasks.contains(victimId) && !fireReportedTasks.contains(victimId)) {
+                    System.err.println("╔══════════════════════════════════════════════════════════════╗");
+                    System.err.println("║  [救护车分配器] 🚨 主动扫描发现需要救护的平民！              ║");
+                    System.err.println("║  平民 ID: " + victimId);
+                    System.err.println("║  伤害: " + human.getDamage());
+                    System.err.println("║  位置: " + pos);
+                    System.err.println("╚══════════════════════════════════════════════════════════════╝");
+                    
+                    civilianTasks.add(victimId);
+                    foundCount++;
+                    
+                    if (human.getDamage() > URGENT_DAMAGE_THRESHOLD) {
+                        urgentTasks.add(victimId);
+                    }
+                }
+            }
+        }
+        
+        if (foundCount > 0) {
+            System.err.println("[救护车分配器] 主动扫描发现 " + foundCount + " 个待救护平民");
+        }
+    }
+    
+    private void cleanupCompletedVictims() {
+        for (EntityID victimId : new ArrayList<>(fireReportedTasks)) {
+            if (isVictimCompleted(victimId)) {
+                completedTasks.add(victimId);
+            }
+        }
+        
+        for (EntityID victimId : new ArrayList<>(civilianTasks)) {
+            if (isVictimCompleted(victimId)) {
+                completedTasks.add(victimId);
+            }
+        }
+        
+        for (EntityID victimId : new ArrayList<>(urgentTasks)) {
+            if (isVictimCompleted(victimId)) {
+                urgentTasks.remove(victimId);
+            }
+        }
+        
+        fireReportedTasks.removeAll(completedTasks);
+        civilianTasks.removeAll(completedTasks);
+    }
+    
+    private boolean isVictimCompleted(EntityID victimId) {
+        Human h = (Human) this.worldInfo.getEntity(victimId);
+        if (h == null) return true;
+        
+        for (AmbulanceTeamInfo info : ambulanceInfoMap.values()) {
+            if (info.transportHuman != null && info.transportHuman.equals(victimId)) {
+                return true;
+            }
+        }
+        
+        if (h.isHPDefined() && h.getHP() == 0) return true;
+        if (h.isDamageDefined() && h.getDamage() == 0) return true;
+        if (!h.isPositionDefined()) return true;
+        
+        EntityID pos = h.getPosition();
+        if (pos != null) {
+            StandardEntity posEntity = this.worldInfo.getEntity(pos);
+            if (posEntity != null && posEntity.getStandardURN() == REFUGE) return true;
+        }
+        
+        if (!isValidPositionEntity(pos)) return true;
+        
+        return false;
+    }
+    
+    private void cleanupExpiredTasks() {
+        int currentTime = this.agentInfo.getTime();
+        List<EntityID> expired = new ArrayList<>();
+        
+        for (Map.Entry<EntityID, Integer> entry : taskStartTime.entrySet()) {
+            if (currentTime - entry.getValue() > TASK_TIMEOUT) {
+                expired.add(entry.getKey());
+            }
+        }
+        
+        for (EntityID taskId : expired) {
+            completedTasks.add(taskId);
+            taskStartTime.remove(taskId);
+            System.err.println("[救护车分配器] ⏰ 任务 " + taskId + " 已超时");
+        }
+    }
+    
+    private List<EntityID> getAllIdleAmbulances() {
+        List<EntityID> result = new ArrayList<>();
+        for (Map.Entry<EntityID, AmbulanceTeamInfo> entry : ambulanceInfoMap.entrySet()) {
+            if (entry.getValue().currentTask == null && entry.getValue().transportHuman == null) {
+                result.add(entry.getKey());
+            }
+        }
+        return result;
+    }
+    
+    private void assignTasks() {
+        cleanupCompletedVictims();
+        
+        List<Task> allTasks = new ArrayList<>();
+        
+        // 紧急任务优先
+        for (EntityID target : urgentTasks) {
+            if (completedTasks.contains(target)) continue;
+            Task task = validateTask(target);
+            if (task != null) {
+                task.priority = PRIORITY_URGENT;
+                allTasks.add(task);
+            }
+        }
+        
+        // 消防员报告的任务
+        for (EntityID target : fireReportedTasks) {
+            if (completedTasks.contains(target)) continue;
+            if (urgentTasks.contains(target)) continue;
+            Task task = validateTask(target);
+            if (task != null) {
+                task.priority = PRIORITY_FIRE_REPORT;
+                allTasks.add(task);
+            }
+        }
+        
+        // 普通平民任务
+        for (EntityID target : civilianTasks) {
+            if (completedTasks.contains(target)) continue;
+            if (urgentTasks.contains(target)) continue;
+            if (fireReportedTasks.contains(target)) continue;
+            Task task = validateTask(target);
+            if (task != null) {
+                task.priority = PRIORITY_CIVILIAN;
+                allTasks.add(task);
+            }
+        }
+        
+        allTasks.sort(Comparator.comparingInt(t -> t.priority));
+        
+        List<EntityID> idleAmbulances = getAllIdleAmbulances();
+        
+        if (idleAmbulances.isEmpty()) {
+            return;
+        }
+        
+        if (!allTasks.isEmpty()) {
+            System.err.println("[救护车分配器] 空闲救护车: " + idleAmbulances.size() + 
+                               " 辆，待分配任务: " + allTasks.size() +
+                               " (紧急:" + urgentTasks.size() + ")");
+        }
+        
+        Set<EntityID> assignedTasks = new HashSet<>();
+        int assignedCount = 0;
+        
+        for (EntityID ambulanceId : idleAmbulances) {
+            Task selectedTask = null;
+            for (Task task : allTasks) {
+                if (assignedTasks.contains(task.target)) continue;
+                
+                int currentCount = taskAssignCount.getOrDefault(task.target, 0);
+                if (currentCount >= MAX_AMBULANCE_PER_VICTIM) continue;
+                
+                if (isVictimCompleted(task.target)) {
+                    completedTasks.add(task.target);
+                    continue;
+                }
+                
+                selectedTask = task;
+                break;
+            }
+            
+            if (selectedTask != null) {
+                assignTaskToAmbulance(ambulanceId, selectedTask.target, selectedTask.priority, selectedTask.taskType);
+                int newCount = taskAssignCount.getOrDefault(selectedTask.target, 0) + 1;
+                taskAssignCount.put(selectedTask.target, newCount);
+                assignedTasks.add(selectedTask.target);
+                assignedCount++;
+                
+                String priorityName = selectedTask.priority == PRIORITY_URGENT ? "紧急" :
+                                      (selectedTask.priority == PRIORITY_FIRE_REPORT ? "消防员报告" : "平民");
+                System.err.println("╔══════════════════════════════════════════════════════════════╗");
+                System.err.println("║  [救护车分配器] 📍 分配任务 (" + priorityName + ")");
+                System.err.println("║  救护车: " + ambulanceId);
+                System.err.println("║  目标: " + selectedTask.target);
+                System.err.println("║  位置: " + selectedTask.position);
+                System.err.println("╚══════════════════════════════════════════════════════════════╝");
+            }
+        }
+        
+        if (assignedCount > 0) {
+            System.err.println("[救护车分配器] ✅ 本轮分配了 " + assignedCount + " 辆救护车");
+        }
+        
+        fireReportedTasks.removeAll(assignedTasks);
+        civilianTasks.removeAll(assignedTasks);
+        urgentTasks.removeAll(assignedTasks);
+    }
+    
+    /**
+     * 验证任务有效性（增强版，包含救护车自检）
+     */
+    private Task validateTask(EntityID target) {
+        // ========== 关键修复：首先检查是否为有效目标（不是救护车自己） ==========
+        if (!isValidTarget(target)) {
+            completedTasks.add(target);
+            return null;
+        }
+        
         Human h = (Human) this.worldInfo.getEntity(target);
-        if (h == null) return null;
-        if (!h.isPositionDefined()) return null;
+        if (h == null) {
+            completedTasks.add(target);
+            return null;
+        }
+        
+        if (!h.isPositionDefined()) {
+            completedTasks.add(target);
+            return null;
+        }
+        
+        EntityID pos = h.getPosition();
+        if (pos == null || !isValidPositionEntity(pos)) {
+            completedTasks.add(target);
+            return null;
+        }
+        
+        StandardEntity posEntity = this.worldInfo.getEntity(pos);
+        if (posEntity != null && posEntity.getStandardURN() == REFUGE) {
+            completedTasks.add(target);
+            return null;
+        }
+        
         if (h.isHPDefined() && h.getHP() == 0) {
             completedTasks.add(target);
             return null;
         }
+        
         boolean isBuried = (h.isBuriednessDefined() && h.getBuriedness() > 0);
         boolean hasDamage = (h.isDamageDefined() && h.getDamage() > 0);
         
-        // 任务要求：未被掩埋
         if (isBuried) {
             completedTasks.add(target);
             return null;
         }
-        
-        StandardEntityURN type = h.getStandardURN();
-        int taskType;
-        int priority;
-        
-        if (isForcedLoad) {
-            // 强制装载：最高优先级，且必须是平民（因为只有平民能被装载）
-            if (type != CIVILIAN) return null;
-            taskType = TASK_TYPE_LOAD;
-            priority = PRIORITY_FORCED_LOAD;
-        } else {
-            if (type == CIVILIAN) {
-                // 平民：装载任务
-                taskType = TASK_TYPE_LOAD;
-                priority = getTypePriority(type);
-            } else {
-                // 非平民：需要受伤才创建治疗任务
-                if (!hasDamage) {
-                    completedTasks.add(target);
-                    return null;
-                }
-                taskType = TASK_TYPE_RESCUE;
-                priority = getTypePriority(type);
-            }
+        if (!hasDamage) {
+            completedTasks.add(target);
+            return null;
         }
         
-        return new Task(target, priority, h.getPosition(), type, taskType);
-    }
-    
-    private int getTypePriority(StandardEntityURN type) {
-        switch (type) {
-            case FIRE_BRIGADE:
-                return PRIORITY_TYPE_FIRE;
-            case POLICE_FORCE:
-                return PRIORITY_TYPE_POLICE;
-            case AMBULANCE_TEAM:
-                return PRIORITY_TYPE_AMBULANCE;
-            case CIVILIAN:
-            default:
-                return PRIORITY_TYPE_CIVILIAN;
-        }
-    }
-    
-    private String getTypeName(StandardEntityURN type) {
-        switch (type) {
-            case FIRE_BRIGADE: return "消防员";
-            case POLICE_FORCE: return "警察";
-            case AMBULANCE_TEAM: return "救护车";
-            case CIVILIAN: return "平民";
-            default: return "未知";
-        }
-    }
-    
-    private String getPriorityName(int priority) {
-        if (priority == PRIORITY_FORCED_LOAD) return "强制装载";
-        if (priority == PRIORITY_TYPE_FIRE) return "消防员";
-        if (priority == PRIORITY_TYPE_POLICE) return "警察";
-        if (priority == PRIORITY_TYPE_AMBULANCE) return "救护车";
-        if (priority == PRIORITY_TYPE_CIVILIAN) return "平民";
-        return "未知";
-    }
-    
-    // ========== 辅助方法 ==========
-    private boolean isReachable(EntityID ambulanceId, EntityID targetPos) {
-        if (this.pathPlanning == null) return true;
-        StandardEntity agent = this.worldInfo.getEntity(ambulanceId);
-        if (!(agent instanceof AmbulanceTeam)) return false;
-        AmbulanceTeam ambulance = (AmbulanceTeam) agent;
-        if (!ambulance.isPositionDefined()) return false;
-        List<EntityID> path = this.pathPlanning.getResult(ambulance.getPosition(), targetPos);
-        return path != null && path.size() > 0;
-    }
-    
-    private double getDistance(EntityID from, EntityID to) {
-        if (this.pathPlanning != null) return this.pathPlanning.getDistance(from, to);
-        StandardEntity fromEntity = this.worldInfo.getEntity(from);
-        StandardEntity toEntity = this.worldInfo.getEntity(to);
-        if (fromEntity != null && toEntity != null) {
-            return this.worldInfo.getDistance(fromEntity, toEntity);
-        }
-        return Double.MAX_VALUE;
+        return new Task(target, 0, pos, TASK_TYPE_LOAD);
     }
     
     private void assignTaskToAmbulance(EntityID ambulanceId, EntityID target, int priority, int taskType) {
-        AmbulanceTeamInfo info = ambulanceTeamInfoMap.get(ambulanceId);
+        // ========== 最终安全检查：确保不会分配救护车自己 ==========
+        if (ambulanceId.equals(target)) {
+            System.err.println("[救护车分配器] ❌ 严重错误！试图分配救护车 " + ambulanceId + " 装载自己！");
+            return;
+        }
+        
+        AmbulanceTeamInfo info = ambulanceInfoMap.get(ambulanceId);
         if (info != null) {
-            if (info.currentTask != null && !info.currentTask.equals(target)) {
-                decrementTaskAssignCount(info.currentTask, info.currentTaskType);
+            if (info.currentTask != null) {
+                int oldCount = taskAssignCount.getOrDefault(info.currentTask, 0);
+                if (oldCount > 0) {
+                    taskAssignCount.put(info.currentTask, oldCount - 1);
+                }
             }
             info.currentTask = target;
-            info.currentTaskPriority = priority;
             info.currentTaskType = taskType;
             info.isBusy = true;
             info.commandTime = this.agentInfo.getTime();
-            ambulanceTeamInfoMap.put(ambulanceId, info);
+            taskStartTime.putIfAbsent(target, this.agentInfo.getTime());
         }
     }
     
     private void checkCompletedTasks() {
-        for (EntityID victimId : new ArrayList<>(loadAssignCount.keySet())) {
-            Human h = (Human) this.worldInfo.getEntity(victimId);
-            if (h == null) {
-                completedTasks.add(victimId);
-                continue;
-            }
-            // 检查是否已被装载
-            for (AmbulanceTeamInfo info : ambulanceTeamInfoMap.values()) {
-                if (info.transportHuman != null && info.transportHuman.equals(victimId)) {
+        for (EntityID victimId : new ArrayList<>(taskAssignCount.keySet())) {
+            if (isVictimCompleted(victimId)) {
+                if (!completedTasks.contains(victimId)) {
                     completedTasks.add(victimId);
-                    System.err.println("[救护车分配器] ✅ 平民 " + victimId + " 已被装载");
-                    break;
+                    System.err.println("[救护车分配器] ✅ 平民 " + victimId + " 已完成");
                 }
-            }
-            if (h.isHPDefined() && h.getHP() == 0) {
-                completedTasks.add(victimId);
-                System.err.println("[救护车分配器] ❌ 平民 " + victimId + " 已死亡");
-            }
-        }
-        
-        for (EntityID victimId : new ArrayList<>(rescueAssignCount.keySet())) {
-            Human h = (Human) this.worldInfo.getEntity(victimId);
-            if (h == null) {
-                completedTasks.add(victimId);
-                continue;
-            }
-            // 检查是否已无伤害（治疗完成）
-            if (h.isDamageDefined() && h.getDamage() == 0) {
-                completedTasks.add(victimId);
-                String typeName = getTypeName(h.getStandardURN());
-                System.err.println("[救护车分配器] ✅ " + typeName + " " + victimId + " 已治愈");
-            }
-            if (h.isHPDefined() && h.getHP() == 0) {
-                completedTasks.add(victimId);
-                String typeName = getTypeName(h.getStandardURN());
-                System.err.println("[救护车分配器] ❌ " + typeName + " " + victimId + " 已死亡");
             }
         }
         
         for (EntityID completed : completedTasks) {
-            loadNowTasks.remove(completed);
-            rescueTasks.remove(completed);
-            forcedLoadTasks.remove(completed);
-            loadAssignCount.remove(completed);
-            rescueAssignCount.remove(completed);
+            civilianTasks.remove(completed);
+            fireReportedTasks.remove(completed);
+            urgentTasks.remove(completed);
+            taskAssignCount.remove(completed);
+            taskStartTime.remove(completed);
         }
+        completedTasks.clear();
     }
 
-    // ========== 消息处理 ==========
+    @Override
+    public AmbulanceTargetAllocator calc() {
+        cleanupExpiredTasks();
+        scanCivilians();
+        activeScanForVictims();
+        checkCompletedTasks();
+        assignTasks();
+        return this;
+    }
+
+    @Override
+    public Map<EntityID, EntityID> getResult() {
+        Map<EntityID, EntityID> result = new HashMap<>();
+        for (Map.Entry<EntityID, AmbulanceTeamInfo> e : ambulanceInfoMap.entrySet()) {
+            AmbulanceTeamInfo info = e.getValue();
+            if (info.currentTask != null && !completedTasks.contains(info.currentTask)) {
+                // ========== 最终安全检查 ==========
+                if (e.getKey().equals(info.currentTask)) {
+                    System.err.println("[救护车分配器] ❌ 发现救护车 " + e.getKey() + " 的任务是自己，跳过");
+                    continue;
+                }
+                result.put(e.getKey(), info.currentTask);
+            }
+        }
+        return result;
+    }
+
     @Override
     public AmbulanceTargetAllocator updateInfo(MessageManager messageManager) {
         super.updateInfo(messageManager);
@@ -511,106 +608,98 @@ public class AmbulanceTargetAllocator extends adf.core.component.module.complex.
         for (CommunicationMessage message : messageManager.getReceivedMessageList()) {
             Class<? extends CommunicationMessage> messageClass = message.getClass();
             
-            // 处理平民消息
             if (messageClass == MessageCivilian.class) {
                 MessageCivilian mc = (MessageCivilian) message;
                 MessageUtil.reflectMessage(this.worldInfo, mc);
                 EntityID victimId = mc.getAgentID();
+                
+                // ========== 检查是否是救护车自己 ==========
+                if (isAmbulanceTeam(victimId)) {
+                    System.err.println("[救护车分配器] ⚠️ 收到救护车自己的消息，忽略");
+                    continue;
+                }
+                
+                System.err.println("╔══════════════════════════════════════════════════════════════╗");
+                System.err.println("║  [救护车分配器] 📨 收到平民报告！                            ║");
+                System.err.println("║  平民 ID: " + victimId);
+                System.err.println("║  伤害: " + (mc.isDamageDefined() ? mc.getDamage() : "未定义"));
+                System.err.println("║  埋压度: " + (mc.isBuriednessDefined() ? mc.getBuriedness() : "未定义"));
+                System.err.println("║  位置: " + mc.getPosition());
+                System.err.println("╚══════════════════════════════════════════════════════════════╝");
+                
+                StandardEntity victimEntity = this.worldInfo.getEntity(victimId);
+                if (!(victimEntity instanceof Human)) continue;
+                
+                Human victim = (Human) victimEntity;
+                
+                if (!victim.isPositionDefined()) {
+                    completedTasks.add(victimId);
+                    continue;
+                }
+                
+                EntityID pos = victim.getPosition();
+                if (pos != null) {
+                    StandardEntity posEntity = this.worldInfo.getEntity(pos);
+                    if (posEntity != null && posEntity.getStandardURN() == REFUGE) {
+                        completedTasks.add(victimId);
+                        continue;
+                    }
+                }
+                
                 boolean isBuried = (mc.isBuriednessDefined() && mc.getBuriedness() > 0);
                 boolean hasDamage = (mc.isDamageDefined() && mc.getDamage() > 0);
-                if (!isBuried) {
-                    // 平民装载任务（无论伤害）
-                    this.loadNowTasks.add(victimId);
-                    System.err.println("[救护车分配器] 📡 收到平民消息: " + victimId + " 已挖出，添加装载任务");
-                } else if (hasDamage) {
-                    // 平民被困且有伤害：应由消防员挖掘，这里仅记录日志
-                    System.err.println("[救护车分配器] 📋 收到平民被困消息: " + victimId + " (被掩埋)");
+                
+                if (!hasDamage) {
+                    completedTasks.add(victimId);
                 }
-            }
-            // 处理警察消息
-            else if (messageClass == MessagePoliceForce.class) {
-                MessagePoliceForce mpf = (MessagePoliceForce) message;
-                MessageUtil.reflectMessage(this.worldInfo, mpf);
-                EntityID victimId = mpf.getAgentID();
-                boolean isBuried = (mpf.isBuriednessDefined() && mpf.getBuriedness() > 0);
-                boolean hasDamage = (mpf.isDamageDefined() && mpf.getDamage() > 0);
+                
                 if (!isBuried && hasDamage) {
-                    this.rescueTasks.add(victimId);
-                    System.err.println("[救护车分配器] 📡 收到警察消息: " + victimId + " 已挖出且有伤害，添加治疗任务");
-                }
-            }
-            // 处理消防员消息
-            else if (messageClass == MessageFireBrigade.class) {
-                MessageFireBrigade mfb = (MessageFireBrigade) message;
-                MessageUtil.reflectMessage(this.worldInfo, mfb);
-                EntityID victimId = mfb.getAgentID();
-                boolean isBuried = (mfb.isBuriednessDefined() && mfb.getBuriedness() > 0);
-                boolean hasDamage = (mfb.isDamageDefined() && mfb.getDamage() > 0);
-                if (!isBuried && hasDamage) {
-                    this.rescueTasks.add(victimId);
-                    System.err.println("[救护车分配器] 📡 收到消防员消息: " + victimId + " 已挖出且有伤害，添加治疗任务");
-                }
-            }
-            // 处理救护车消息
-            else if (messageClass == MessageAmbulanceTeam.class) {
-                MessageAmbulanceTeam mat = (MessageAmbulanceTeam) message;
-                MessageUtil.reflectMessage(this.worldInfo, mat);
-                EntityID victimId = mat.getAgentID();
-                boolean isBuried = (mat.isBuriednessDefined() && mat.getBuriedness() > 0);
-                boolean hasDamage = (mat.isDamageDefined() && mat.getDamage() > 0);
-                if (!isBuried && hasDamage) {
-                    this.rescueTasks.add(victimId);
-                    System.err.println("[救护车分配器] 📡 收到救护车消息: " + victimId + " 已挖出且有伤害，添加治疗任务");
-                }
-            }
-            // 处理强制装载命令
-            else if (messageClass == CommandAmbulance.class) {
-                CommandAmbulance cmd = (CommandAmbulance) message;
-                if (cmd.getAction() == CommandAmbulance.ACTION_LOAD && cmd.isBroadcast()) {
-                    EntityID target = cmd.getTargetID();
-                    if (target != null) {
-                        this.forcedLoadTasks.add(target);
-                        System.err.println("[救护车分配器] 🚨 收到强制装载命令: " + target);
+                    if (!completedTasks.contains(victimId) && !fireReportedTasks.contains(victimId)) {
+                        this.fireReportedTasks.add(victimId);
+                        System.err.println("[救护车分配器] ✅ 平民 " + victimId + " 加入任务列表");
                     }
                 }
             }
         }
         
-        // 处理救护车自身状态消息
         for (CommunicationMessage message : messageManager.getReceivedMessageList(MessageAmbulanceTeam.class)) {
             MessageAmbulanceTeam mat = (MessageAmbulanceTeam) message;
             MessageUtil.reflectMessage(this.worldInfo, mat);
-            AmbulanceTeamInfo info = this.ambulanceTeamInfoMap.get(mat.getAgentID());
+            AmbulanceTeamInfo info = this.ambulanceInfoMap.get(mat.getAgentID());
             if (info == null) {
                 info = new AmbulanceTeamInfo(mat.getAgentID());
-                this.ambulanceTeamInfoMap.put(mat.getAgentID(), info);
+                this.ambulanceInfoMap.put(mat.getAgentID(), info);
             }
             if (mat.getAction() == MessageAmbulanceTeam.ACTION_LOAD) {
                 info.transportHuman = mat.getTargetID();
                 info.isBusy = true;
+                victimsWaitingForLoad.add(mat.getTargetID());
             } else if (mat.getAction() == MessageAmbulanceTeam.ACTION_UNLOAD) {
                 info.transportHuman = null;
                 info.isBusy = false;
                 info.currentTask = null;
+                victimsWaitingForLoad.clear();
             }
             if (currentTime >= info.commandTime + 2) {
                 updateAmbulanceInfo(info, mat);
             }
         }
         
-        // 处理任务完成报告
         for (CommunicationMessage message : messageManager.getReceivedMessageList(MessageReport.class)) {
             MessageReport report = (MessageReport) message;
             if (report.isDone()) {
-                AmbulanceTeamInfo info = this.ambulanceTeamInfoMap.get(report.getSenderID());
-                if (info != null) {
-                    if (info.currentTask != null) {
-                        decrementTaskAssignCount(info.currentTask, info.currentTaskType);
-                    }
+                AmbulanceTeamInfo info = this.ambulanceInfoMap.get(report.getSenderID());
+                if (info != null && info.currentTask != null) {
+                    completedTasks.add(info.currentTask);
+                    taskAssignCount.remove(info.currentTask);
+                    taskStartTime.remove(info.currentTask);
+                    victimsWaitingForLoad.remove(info.currentTask);
+                    
+                    System.err.println("[救护车分配器] ✅ 救护车 " + report.getSenderID() + 
+                                       " 完成任务: " + info.currentTask);
+                    
                     info.currentTask = null;
                     info.isBusy = false;
-                    info.canNewAction = true;
-                    System.err.println("[救护车分配器] 救护车 " + report.getSenderID() + " 完成任务");
                 }
             }
         }
@@ -620,12 +709,10 @@ public class AmbulanceTargetAllocator extends adf.core.component.module.complex.
     private void updateAmbulanceInfo(AmbulanceTeamInfo info, MessageAmbulanceTeam message) {
         if (message.isBuriednessDefined() && message.getBuriedness() > 0) {
             info.isBusy = false;
-            info.canNewAction = false;
             return;
         }
         switch (message.getAction()) {
             case MessageAmbulanceTeam.ACTION_REST:
-                info.canNewAction = true;
                 info.isBusy = false;
                 break;
             case MessageAmbulanceTeam.ACTION_MOVE:
@@ -634,34 +721,28 @@ public class AmbulanceTargetAllocator extends adf.core.component.module.complex.
             case MessageAmbulanceTeam.ACTION_RESCUE:
             case MessageAmbulanceTeam.ACTION_LOAD:
                 info.isBusy = true;
-                info.canNewAction = false;
                 break;
             case MessageAmbulanceTeam.ACTION_UNLOAD:
-                info.canNewAction = true;
                 info.isBusy = false;
                 info.transportHuman = null;
                 break;
         }
     }
 
-    // ========== 内部类 ==========
-    private class AmbulanceTeamInfo {
+    private static class AmbulanceTeamInfo {
         EntityID id;
         EntityID currentTask;
-        int currentTaskPriority;
-        int currentTaskType;  // TASK_TYPE_LOAD 或 TASK_TYPE_RESCUE
+        int currentTaskType;
         EntityID transportHuman;
         boolean isBusy;
-        boolean canNewAction;
         int commandTime;
+        
         AmbulanceTeamInfo(EntityID id) {
             this.id = id;
             this.currentTask = null;
-            this.currentTaskPriority = PRIORITY_TYPE_CIVILIAN;
             this.currentTaskType = -1;
             this.transportHuman = null;
             this.isBusy = false;
-            this.canNewAction = true;
             this.commandTime = -1;
         }
     }
@@ -670,13 +751,12 @@ public class AmbulanceTargetAllocator extends adf.core.component.module.complex.
         EntityID target;
         int priority;
         EntityID position;
-        StandardEntityURN type;
-        int taskType;  // TASK_TYPE_LOAD 或 TASK_TYPE_RESCUE
-        Task(EntityID target, int priority, EntityID position, StandardEntityURN type, int taskType) {
+        int taskType;
+        
+        Task(EntityID target, int priority, EntityID position, int taskType) {
             this.target = target;
             this.priority = priority;
             this.position = position;
-            this.type = type;
             this.taskType = taskType;
         }
     }

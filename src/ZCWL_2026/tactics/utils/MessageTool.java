@@ -24,6 +24,16 @@ public class MessageTool {
     private boolean isBroadcastEnabled;
     private int maxMessagesPerCycle;
     private int scoutRange;
+    
+    // 频率限制
+    private Map<EntityID, Integer> messageSendCount;
+    private Map<EntityID, Integer> lastSendTime;
+    private static final int MAX_SEND_PER_ENTITY = 5;
+    private static final int MAX_VOICE_MESSAGES = 2;  // 增加到2条
+    private int voiceMessageCount;
+    
+    // 当前时间
+    private int currentTime;
 
     public MessageTool(ScenarioInfo scenarioInfo, DevelopData developData) {
         this.scenarioInfo = scenarioInfo;
@@ -31,19 +41,21 @@ public class MessageTool {
         this.sentRequestMessages = new HashSet<>();
         this.sentInformationMessages = new HashSet<>();
         
-        // 从配置读取参数
-        this.isRadioEnabled = developData.getBoolean("MessageTool.radioEnabled", true);
-        this.isBroadcastEnabled = developData.getBoolean("MessageTool.broadcastEnabled", true);
-        this.maxMessagesPerCycle = developData.getInteger("MessageTool.maxMessagesPerCycle", 10);
+        this.messageSendCount = new HashMap<>();
+        this.lastSendTime = new HashMap<>();
+        this.voiceMessageCount = 0;
+        this.currentTime = 0;
+        
+        this.isRadioEnabled = developData.getBoolean("MessageTool.radioEnabled", false);  // 默认使用无线
+        this.isBroadcastEnabled = developData.getBoolean("MessageTool.broadcastEnabled", false);
+        this.maxMessagesPerCycle = developData.getInteger("MessageTool.maxMessagesPerCycle", 5);
         this.scoutRange = developData.getInteger("MessageTool.scoutRange", 5000);
+        
+        System.err.println("[MessageTool] 初始化完成，最大消息数/轮: " + maxMessagesPerCycle);
     }
 
-    /**
-     * 反射消息 - 更新世界信息
-     */
     public void reflectMessage(AgentInfo agentInfo, WorldInfo worldInfo,
                                ScenarioInfo scenarioInfo, MessageManager messageManager) {
-        // 处理所有接收到的消息
         for (adf.core.component.communication.CommunicationMessage message : 
              messageManager.getReceivedMessageList()) {
             
@@ -71,32 +83,109 @@ public class MessageTool {
         }
     }
 
-    /**
-     * 发送请求消息
-     */
     public void sendRequestMessages(AgentInfo agentInfo, WorldInfo worldInfo,
                                     ScenarioInfo scenarioInfo, MessageManager messageManager) {
-        // 警察通常不需要发送请求消息，但可以留作扩展
+        // 警察不需要发送请求消息
     }
 
     /**
-     * 发送信息消息（主要方法）
+     * 发送信息消息 - 优先发送平民报告
      */
     public void sendInformationMessages(AgentInfo agentInfo, WorldInfo worldInfo,
                                         ScenarioInfo scenarioInfo, MessageManager messageManager) {
-        // 限制每轮最多发送的消息数量
+        this.currentTime = agentInfo.getTime();
+        this.voiceMessageCount = 0;
+        
         int messageCount = 0;
         
-        // 1. 发送道路信息（高优先级）
-        messageCount += sendRoadInformation(agentInfo, worldInfo, messageManager, messageCount);
-        if (messageCount >= maxMessagesPerCycle) return;
-        
-        // 2. 发送平民信息（被困人员）
+        // 优先发送平民信息（最重要的消息）
         messageCount += sendCivilianInformation(agentInfo, worldInfo, messageManager, messageCount);
         if (messageCount >= maxMessagesPerCycle) return;
         
-        // 3. 发送警察状态信息
+        // 再发送道路信息
+        messageCount += sendRoadInformation(agentInfo, worldInfo, messageManager, messageCount);
+        if (messageCount >= maxMessagesPerCycle) return;
+        
+        // 最后发送状态信息
         messageCount += sendPoliceInformation(agentInfo, worldInfo, messageManager, messageCount);
+    }
+
+    /**
+     * 发送平民信息 - 优先发送已挖出的平民
+     */
+    private int sendCivilianInformation(AgentInfo agentInfo, WorldInfo worldInfo,
+                                        MessageManager messageManager, int currentCount) {
+        int sentCount = 0;
+        
+        Collection<StandardEntity> entitiesInRange = worldInfo.getObjectsInRange(
+            agentInfo.getPosition(), 
+            this.scoutRange
+        );
+        
+        // 分类平民
+        List<Civilian> unburiedCivilians = new ArrayList<>();  // 已挖出的（需要救护车）
+        List<Civilian> buriedCivilians = new ArrayList<>();     // 被掩埋的（需要消防员）
+        
+        for (StandardEntity entity : entitiesInRange) {
+            if (entity instanceof Civilian) {
+                Civilian civilian = (Civilian) entity;
+                boolean isBuried = civilian.isBuriednessDefined() && civilian.getBuriedness() > 0;
+                boolean hasDamage = civilian.isDamageDefined() && civilian.getDamage() > 0;
+                
+                if (!isBuried && hasDamage) {
+                    unburiedCivilians.add(civilian);  // 已挖出的平民，优先发送
+                } else if (isBuried) {
+                    buriedCivilians.add(civilian);
+                }
+            }
+        }
+        
+        // 优先发送已挖出的平民（他们需要救护车！）
+        for (Civilian civilian : unburiedCivilians) {
+            if (sentCount + currentCount >= maxMessagesPerCycle) break;
+            
+            EntityID civilianId = civilian.getID();
+            
+            if (!canSendMessage(civilianId)) continue;
+            if (!civilian.isPositionDefined()) {
+                System.err.println("[MessageTool] ⚠️ 平民 " + civilianId + " 位置未定义，跳过");
+                continue;
+            }
+            
+            // 使用无线消息（isRadio = false）确保送达
+            MessageCivilian msg = new MessageCivilian(false, civilian);
+            messageManager.addMessage(msg);
+            this.sentInformationMessages.add(civilianId);
+            recordMessageSent(civilianId);
+            sentCount++;
+            
+            System.err.println("[MessageTool] 🚨 紧急报告已挖出平民: " + civilianId + 
+                               " 伤害=" + civilian.getDamage() +
+                               " 位置=" + civilian.getPosition());
+        }
+        
+        // 再发送被掩埋的平民（需要消防员）
+        for (Civilian civilian : buriedCivilians) {
+            if (sentCount + currentCount >= maxMessagesPerCycle) break;
+            if (voiceMessageCount >= MAX_VOICE_MESSAGES) break;
+            
+            EntityID civilianId = civilian.getID();
+            
+            if (!canSendMessage(civilianId)) continue;
+            if (!civilian.isPositionDefined()) continue;
+            
+            MessageCivilian msg = new MessageCivilian(this.isRadioEnabled, civilian);
+            messageManager.addMessage(msg);
+            this.sentInformationMessages.add(civilianId);
+            recordMessageSent(civilianId);
+            sentCount++;
+            voiceMessageCount++;
+            
+            System.err.println("[MessageTool] 📢 上报被困平民: " + civilianId + 
+                               " 埋压度=" + civilian.getBuriedness());
+        }
+        
+        return sentCount;
     }
 
     /**
@@ -106,18 +195,19 @@ public class MessageTool {
                                     MessageManager messageManager, int currentCount) {
         int sentCount = 0;
         
-        // 获取当前所在道路
         EntityID position = agentInfo.getPosition();
         StandardEntity entity = worldInfo.getEntity(position);
         
         if (entity instanceof Road) {
             Road road = (Road) entity;
             
-            // 如果道路有路障且未发送过信息
+            if (!canSendMessage(road.getID())) {
+                return 0;
+            }
+            
             if (road.isBlockadesDefined() && !road.getBlockades().isEmpty() &&
                 !this.sentInformationMessages.contains(road.getID())) {
                 
-                // 获取第一个路障
                 Blockade blockade = null;
                 if (!road.getBlockades().isEmpty()) {
                     EntityID blockadeId = road.getBlockades().get(0);
@@ -128,79 +218,31 @@ public class MessageTool {
                 }
                 
                 MessageRoad msg = new MessageRoad(
-                    this.isRadioEnabled,
+                    false,  // 使用无线消息
                     road,
                     blockade,
-                    false,  // isPassable - 道路不可通行
-                    true    // isSendBlockadeLocation - 发送路障位置
+                    false,
+                    true
                 );
                 messageManager.addMessage(msg);
                 this.sentInformationMessages.add(road.getID());
+                recordMessageSent(road.getID());
                 sentCount++;
             }
-            // 如果道路已清理，发送可通行信息
             else if ((!road.isBlockadesDefined() || road.getBlockades().isEmpty()) &&
                      !this.sentInformationMessages.contains(road.getID())) {
                 
                 MessageRoad msg = new MessageRoad(
-                    this.isRadioEnabled,
+                    false,  // 使用无线消息
                     road,
-                    null,   // blockade - 没有路障
-                    true,   // isPassable - 道路可通行
-                    false   // isSendBlockadeLocation - 不需要发送路障位置
+                    null,
+                    true,
+                    false
                 );
                 messageManager.addMessage(msg);
                 this.sentInformationMessages.add(road.getID());
+                recordMessageSent(road.getID());
                 sentCount++;
-            }
-        }
-        
-        return sentCount;
-    }
-
-    /**
-     * 发送平民信息（修正 getObjectsInRange 的返回类型）
-     */
-    private int sendCivilianInformation(AgentInfo agentInfo, WorldInfo worldInfo,
-                                        MessageManager messageManager, int currentCount) {
-        int sentCount = 0;
-        
-        // getObjectsInRange 返回 Collection<StandardEntity>
-        Collection<StandardEntity> entitiesInRange = worldInfo.getObjectsInRange(
-            agentInfo.getPosition(), 
-            this.scoutRange
-        );
-        
-        for (StandardEntity entity : entitiesInRange) {
-            if (sentCount + currentCount >= maxMessagesPerCycle) break;
-            
-            // 检查是否为平民
-            if (entity instanceof Civilian) {
-                Civilian civilian = (Civilian) entity;
-                // 只上报被困的平民（有埋压值的平民）
-                if (civilian.isBuriednessDefined() && civilian.getBuriedness() > 0 &&
-                    !this.sentInformationMessages.contains(civilian.getID())) {
-                    
-                    MessageCivilian msg = new MessageCivilian(
-                        this.isRadioEnabled,
-                        civilian
-                    );
-                    messageManager.addMessage(msg);
-                    this.sentInformationMessages.add(civilian.getID());
-                    sentCount++;
-                }
-                // 也可以上报受伤的平民
-                else if (civilian.isDamageDefined() && civilian.getDamage() > 0 &&
-                         !this.sentInformationMessages.contains(civilian.getID())) {
-                    
-                    MessageCivilian msg = new MessageCivilian(
-                        this.isRadioEnabled,
-                        civilian
-                    );
-                    messageManager.addMessage(msg);
-                    this.sentInformationMessages.add(civilian.getID());
-                    sentCount++;
-                }
             }
         }
         
@@ -215,177 +257,158 @@ public class MessageTool {
         int sentCount = 0;
         
         PoliceForce police = (PoliceForce) agentInfo.me();
+        EntityID policeId = police.getID();
         
-        // 如果警察状态有变化且未发送过
-        if (police.isPositionDefined() && !this.sentInformationMessages.contains(police.getID())) {
+        Integer lastSend = lastSendTime.get(policeId);
+        if (lastSend != null && this.currentTime - lastSend < 10) {
+            return 0;
+        }
+        
+        if (police.isPositionDefined() && !this.sentInformationMessages.contains(policeId)) {
             
-            // 判断当前动作
-            int action = MessagePoliceForce.ACTION_MOVE; // 默认移动状态
+            int action = MessagePoliceForce.ACTION_MOVE;
             
             MessagePoliceForce msg = new MessagePoliceForce(
-                this.isRadioEnabled,
+                false,  // 使用无线消息
                 police,
                 action,
-                null  // target
+                null
             );
             messageManager.addMessage(msg);
-            this.sentInformationMessages.add(police.getID());
+            this.sentInformationMessages.add(policeId);
+            recordMessageSent(policeId);
             sentCount++;
         }
         
         return sentCount;
     }
+    
+    private boolean canSendMessage(EntityID entityId) {
+        Integer lastTime = lastSendTime.get(entityId);
+        Integer count = messageSendCount.getOrDefault(entityId, 0);
+        
+        if (count >= MAX_SEND_PER_ENTITY) {
+            return false;
+        }
+        
+        if (lastTime != null && this.currentTime - lastTime < 3) {
+            return false;
+        }
+        
+        return true;
+    }
+    
+    private void recordMessageSent(EntityID entityId) {
+        lastSendTime.put(entityId, this.currentTime);
+        messageSendCount.put(entityId, messageSendCount.getOrDefault(entityId, 0) + 1);
+    }
 
-    /**
-     * 批量发送已清理的道路信息
-     */
     public void sendClearedRoads(AgentInfo agentInfo, WorldInfo worldInfo,
                                  MessageManager messageManager, Set<EntityID> clearedRoads) {
+        int sentCount = 0;
         for (EntityID roadId : clearedRoads) {
+            if (sentCount >= maxMessagesPerCycle) break;
+            
             StandardEntity entity = worldInfo.getEntity(roadId);
             if (entity instanceof Road && !this.sentInformationMessages.contains(roadId)) {
                 Road road = (Road) entity;
                 
-                MessageRoad msg = new MessageRoad(
-                    this.isRadioEnabled,
-                    road,
-                    null,   // blockade - 没有路障
-                    true,   // isPassable - 道路可通行
-                    false   // isSendBlockadeLocation - 不需要发送路障位置
-                );
-                messageManager.addMessage(msg);
-                this.sentInformationMessages.add(roadId);
-            }
-        }
-    }
-
-    /**
-     * 批量发送发现的被困人员
-     */
-    public void sendDiscoveredVictims(AgentInfo agentInfo, WorldInfo worldInfo,
-                                      MessageManager messageManager, Set<EntityID> victims) {
-        for (EntityID victimId : victims) {
-            StandardEntity entity = worldInfo.getEntity(victimId);
-            if (entity instanceof Civilian && !this.sentInformationMessages.contains(victimId)) {
-                Civilian civilian = (Civilian) entity;
-                if (civilian.isPositionDefined() && civilian.getBuriedness() > 0) {
-                    MessageCivilian msg = new MessageCivilian(
-                        this.isRadioEnabled,
-                        civilian
+                if (canSendMessage(roadId)) {
+                    MessageRoad msg = new MessageRoad(
+                        false,
+                        road,
+                        null,
+                        true,
+                        false
                     );
                     messageManager.addMessage(msg);
-                    this.sentInformationMessages.add(victimId);
+                    this.sentInformationMessages.add(roadId);
+                    recordMessageSent(roadId);
+                    sentCount++;
                 }
             }
         }
     }
 
-    /**
-     * 发送所有范围内的平民信息（不限于被困）
-     */
+    public void sendDiscoveredVictims(AgentInfo agentInfo, WorldInfo worldInfo,
+                                      MessageManager messageManager, Set<EntityID> victims) {
+        int sentCount = 0;
+        for (EntityID victimId : victims) {
+            if (sentCount >= maxMessagesPerCycle) break;
+            if (voiceMessageCount >= MAX_VOICE_MESSAGES) break;
+            
+            StandardEntity entity = worldInfo.getEntity(victimId);
+            if (entity instanceof Civilian && !this.sentInformationMessages.contains(victimId)) {
+                Civilian civilian = (Civilian) entity;
+                if (civilian.isPositionDefined() && civilian.getBuriedness() > 0) {
+                    if (canSendMessage(victimId)) {
+                        MessageCivilian msg = new MessageCivilian(false, civilian);
+                        messageManager.addMessage(msg);
+                        this.sentInformationMessages.add(victimId);
+                        recordMessageSent(victimId);
+                        sentCount++;
+                        voiceMessageCount++;
+                    }
+                }
+            }
+        }
+    }
+
     public void sendAllCiviliansInRange(AgentInfo agentInfo, WorldInfo worldInfo,
                                         MessageManager messageManager) {
+        int sentCount = 0;
         Collection<StandardEntity> entitiesInRange = worldInfo.getObjectsInRange(
             agentInfo.getPosition(), 
             this.scoutRange
         );
         
         for (StandardEntity entity : entitiesInRange) {
+            if (sentCount >= maxMessagesPerCycle) break;
+            if (voiceMessageCount >= MAX_VOICE_MESSAGES) break;
+            
             if (entity instanceof Civilian) {
                 Civilian civilian = (Civilian) entity;
-                if (!this.sentInformationMessages.contains(civilian.getID())) {
-                    MessageCivilian msg = new MessageCivilian(
-                        this.isRadioEnabled,
-                        civilian
-                    );
+                EntityID civilianId = civilian.getID();
+                
+                if (!this.sentInformationMessages.contains(civilianId) && canSendMessage(civilianId)) {
+                    MessageCivilian msg = new MessageCivilian(false, civilian);
                     messageManager.addMessage(msg);
-                    this.sentInformationMessages.add(civilian.getID());
+                    this.sentInformationMessages.add(civilianId);
+                    recordMessageSent(civilianId);
+                    sentCount++;
+                    voiceMessageCount++;
                 }
             }
         }
     }
 
-    /**
-     * 发送警察清理动作消息
-     */
-    public void sendPoliceClearAction(AgentInfo agentInfo, WorldInfo worldInfo,
-                                      MessageManager messageManager, EntityID target) {
-        PoliceForce police = (PoliceForce) agentInfo.me();
-        
-        MessagePoliceForce msg = new MessagePoliceForce(
-            this.isRadioEnabled,
-            police,
-            MessagePoliceForce.ACTION_CLEAR,
-            target
-        );
-        messageManager.addMessage(msg);
-    }
-
-    /**
-     * 发送警察移动动作消息
-     */
-    public void sendPoliceMoveAction(AgentInfo agentInfo, WorldInfo worldInfo,
-                                     MessageManager messageManager, EntityID target) {
-        PoliceForce police = (PoliceForce) agentInfo.me();
-        
-        MessagePoliceForce msg = new MessagePoliceForce(
-            this.isRadioEnabled,
-            police,
-            MessagePoliceForce.ACTION_MOVE,
-            target
-        );
-        messageManager.addMessage(msg);
-    }
-
-    /**
-     * 发送警察休息动作消息
-     */
-    public void sendPoliceRestAction(AgentInfo agentInfo, WorldInfo worldInfo,
-                                     MessageManager messageManager) {
-        PoliceForce police = (PoliceForce) agentInfo.me();
-        
-        MessagePoliceForce msg = new MessagePoliceForce(
-            this.isRadioEnabled,
-            police,
-            MessagePoliceForce.ACTION_REST,
-            null
-        );
-        messageManager.addMessage(msg);
-    }
-
-    /**
-     * 检查是否已发送过某个实体的信息
-     */
     public boolean isInformationSent(EntityID entityId) {
         return this.sentInformationMessages.contains(entityId);
     }
 
-    /**
-     * 标记信息已发送
-     */
     public void markInformationSent(EntityID entityId) {
         this.sentInformationMessages.add(entityId);
+        recordMessageSent(entityId);
     }
 
-    /**
-     * 重置发送记录
-     */
     public void reset() {
         this.sentRequestMessages.clear();
         this.sentInformationMessages.clear();
+        this.messageSendCount.clear();
+        this.lastSendTime.clear();
+        this.voiceMessageCount = 0;
     }
     
-    /**
-     * 部分重置（只重置信息发送记录）
-     */
     public void resetInformationMessages() {
         this.sentInformationMessages.clear();
+        this.voiceMessageCount = 0;
     }
     
-    /**
-     * 部分重置（只重置请求发送记录）
-     */
     public void resetRequestMessages() {
         this.sentRequestMessages.clear();
+    }
+    
+    public int getVoiceMessageCount() {
+        return voiceMessageCount;
     }
 }
