@@ -26,20 +26,41 @@ import java.util.List;
 public class MessageCoordinator extends adf.core.component.communication.MessageCoordinator {
 
     @Override
-    public void coordinate(AgentInfo agentInfo, WorldInfo worldInfo, ScenarioInfo scenarioInfo, MessageManager messageManager,
-                           ArrayList<CommunicationMessage> sendMessageList, List<List<CommunicationMessage>> channelSendMessageList) {
+    public void coordinate(AgentInfo agentInfo, WorldInfo worldInfo, ScenarioInfo scenarioInfo,
+                           MessageManager messageManager,
+                           ArrayList<CommunicationMessage> sendMessageList,
+                           List<List<CommunicationMessage>> channelSendMessageList) {
 
-        // have different lists for every agent
+        StandardEntityURN agentType = getAgentType(agentInfo, worldInfo);
+        
+        // 诊断日志：打印当前智能体和待发送消息概况
+        /*System.err.println("============================================================");
+        System.err.println("[MessageCoordinator] 时间=" + agentInfo.getTime() + 
+                           " 智能体=" + agentType + " ID=" + agentInfo.getID());
+        System.err.println("[MessageCoordinator] 待发送消息总数=" + sendMessageList.size());*/
+        
+        int commandPoliceCount = 0;
+        for (CommunicationMessage msg : sendMessageList) {
+            if (msg instanceof CommandPolice) {
+                commandPoliceCount++;
+                CommandPolice cmd = (CommandPolice) msg;
+                //System.err.println("[MessageCoordinator]   -> CommandPolice: toID=" + cmd.getToID() + 
+                  //                 ", target=" + cmd.getTargetID() + ", action=" + cmd.getAction());
+            }
+        }
+        if (commandPoliceCount > 0) {
+           // System.err.println("[MessageCoordinator] 包含 " + commandPoliceCount + " 条警察命令");
+        }
+       // System.err.println("============================================================");
+
+        // 分类列表
         ArrayList<CommunicationMessage> policeMessages = new ArrayList<>();
         ArrayList<CommunicationMessage> ambulanceMessages = new ArrayList<>();
         ArrayList<CommunicationMessage> fireBrigadeMessages = new ArrayList<>();
-
         ArrayList<CommunicationMessage> voiceMessages = new ArrayList<>();
 
-        StandardEntityURN agentType = getAgentType(agentInfo, worldInfo);
-
         for (CommunicationMessage msg : sendMessageList) {
-            if (msg instanceof StandardMessage && !((StandardMessage)msg).isRadio()) {
+            if (msg instanceof StandardMessage && !((StandardMessage) msg).isRadio()) {
                 voiceMessages.add(msg);
             } else {
                 if (msg instanceof MessageBuilding) {
@@ -86,18 +107,30 @@ public class MessageCoordinator extends adf.core.component.communication.Message
             }
         }
 
-        if (scenarioInfo.getCommsChannelsCount() > 1) {
-            // send radio messages if there are more than one communication channel
-            int[] channelSize = new int[scenarioInfo.getCommsChannelsCount() - 1];
+        // 打印分类结果
+       /*  System.err.println("[MessageCoordinator] 分类结果: police=" + policeMessages.size() +
+                           ", ambulance=" + ambulanceMessages.size() +
+                           ", fire=" + fireBrigadeMessages.size() +
+                           ", voice=" + voiceMessages.size());*/
 
-            setSendMessages(scenarioInfo, StandardEntityURN.POLICE_FORCE, agentInfo, worldInfo, policeMessages,
-                    channelSendMessageList, channelSize);
-            setSendMessages(scenarioInfo, StandardEntityURN.AMBULANCE_TEAM, agentInfo, worldInfo, ambulanceMessages,
-                    channelSendMessageList, channelSize);
-            setSendMessages(scenarioInfo, StandardEntityURN.FIRE_BRIGADE, agentInfo, worldInfo, fireBrigadeMessages,
-                    channelSendMessageList, channelSize);
+        // 分配到无线频道
+        if (scenarioInfo.getCommsChannelsCount() > 1) {
+            int[] channelSize = new int[scenarioInfo.getCommsChannelsCount() - 1];
+            setSendMessages(scenarioInfo, StandardEntityURN.POLICE_FORCE, agentInfo, worldInfo,
+                            policeMessages, channelSendMessageList, channelSize);
+            setSendMessages(scenarioInfo, StandardEntityURN.AMBULANCE_TEAM, agentInfo, worldInfo,
+                            ambulanceMessages, channelSendMessageList, channelSize);
+            setSendMessages(scenarioInfo, StandardEntityURN.FIRE_BRIGADE, agentInfo, worldInfo,
+                            fireBrigadeMessages, channelSendMessageList, channelSize);
+            
+            // 打印最终各频道消息数
+            for (int i = 1; i < channelSendMessageList.size(); i++) {
+                //System.err.println("[MessageCoordinator] 频道" + i + " 消息数=" + 
+                                   //channelSendMessageList.get(i).size());
+            }
         }
 
+        // 语音频道处理
         ArrayList<StandardMessage> voiceMessageLowList = new ArrayList<>();
         ArrayList<StandardMessage> voiceMessageNormalList = new ArrayList<>();
         ArrayList<StandardMessage> voiceMessageHighList = new ArrayList<>();
@@ -119,24 +152,18 @@ public class MessageCoordinator extends adf.core.component.communication.Message
             }
         }
 
-        // set the voice channel messages
         channelSendMessageList.get(0).addAll(voiceMessageHighList);
         channelSendMessageList.get(0).addAll(voiceMessageNormalList);
         channelSendMessageList.get(0).addAll(voiceMessageLowList);
     }
 
     protected int[] getChannelsByAgentType(StandardEntityURN agentType, AgentInfo agentInfo,
-                                        WorldInfo worldInfo, ScenarioInfo scenarioInfo, int channelIndex) {
-        int numChannels = scenarioInfo.getCommsChannelsCount()-1; // 0th channel is the voice channel
-        int maxChannelCount = 0;
-        boolean isPlatoon = isPlatoonAgent(agentInfo, worldInfo);
-        if (isPlatoon) {
-            maxChannelCount = scenarioInfo.getCommsChannelsMaxPlatoon();
-        } else {
-            maxChannelCount = scenarioInfo.getCommsChannelsMaxOffice();
-        }
+                                           WorldInfo worldInfo, ScenarioInfo scenarioInfo, int channelIndex) {
+        int numChannels = scenarioInfo.getCommsChannelsCount() - 1;
+        int maxChannelCount = isPlatoonAgent(agentInfo, worldInfo)
+                ? scenarioInfo.getCommsChannelsMaxPlatoon()
+                : scenarioInfo.getCommsChannelsMaxOffice();
         int[] channels = new int[maxChannelCount];
-
         for (int i = 0; i < maxChannelCount; i++) {
             channels[i] = ChannelSubscriber.getChannelNumber(agentType, i, numChannels);
         }
@@ -145,42 +172,38 @@ public class MessageCoordinator extends adf.core.component.communication.Message
 
     protected boolean isPlatoonAgent(AgentInfo agentInfo, WorldInfo worldInfo) {
         StandardEntityURN agentType = getAgentType(agentInfo, worldInfo);
-        if (agentType == StandardEntityURN.FIRE_BRIGADE ||
-                agentType == StandardEntityURN.POLICE_FORCE ||
-                agentType == StandardEntityURN.AMBULANCE_TEAM) {
-            return true;
-        }
-        return false;
+        return agentType == StandardEntityURN.FIRE_BRIGADE ||
+               agentType == StandardEntityURN.POLICE_FORCE ||
+               agentType == StandardEntityURN.AMBULANCE_TEAM;
     }
 
     protected StandardEntityURN getAgentType(AgentInfo agentInfo, WorldInfo worldInfo) {
-        StandardEntityURN agentType = worldInfo.getEntity(agentInfo.getID()).getStandardURN();
-        return agentType;
+        return worldInfo.getEntity(agentInfo.getID()).getStandardURN();
     }
 
-    protected void setSendMessages(ScenarioInfo scenarioInfo, StandardEntityURN agentType, AgentInfo agentInfo,
-                                   WorldInfo worldInfo, List<CommunicationMessage> messages,
+    protected void setSendMessages(ScenarioInfo scenarioInfo, StandardEntityURN agentType,
+                                   AgentInfo agentInfo, WorldInfo worldInfo,
+                                   List<CommunicationMessage> messages,
                                    List<List<CommunicationMessage>> channelSendMessageList,
                                    int[] channelSize) {
         int channelIndex = 0;
         int[] channels = getChannelsByAgentType(agentType, agentInfo, worldInfo, scenarioInfo, channelIndex);
         int channel = channels[channelIndex];
         int channelCapacity = scenarioInfo.getCommsChannelBandwidth(channel);
-        // start from HIGH, NORMAL, to LOW
-        for (int i = StandardMessagePriority.values().length-1; i >= 0; i--) {
+
+        for (int i = StandardMessagePriority.values().length - 1; i >= 0; i--) {
             for (CommunicationMessage msg : messages) {
                 StandardMessage smsg = (StandardMessage) msg;
                 if (smsg.getSendingPriority() == StandardMessagePriority.values()[i]) {
-                    channelSize[channel-1] += smsg.getByteArraySize();
-                    if (channelSize[channel-1] > channelCapacity) {
-                        channelSize[channel-1] -= smsg.getByteArraySize();
+                    channelSize[channel - 1] += smsg.getByteArraySize();
+                    if (channelSize[channel - 1] > channelCapacity) {
+                        channelSize[channel - 1] -= smsg.getByteArraySize();
                         channelIndex++;
                         if (channelIndex < channels.length) {
                             channel = channels[channelIndex];
                             channelCapacity = scenarioInfo.getCommsChannelBandwidth(channel);
-                            channelSize[channel-1] += smsg.getByteArraySize();
+                            channelSize[channel - 1] += smsg.getByteArraySize();
                         } else {
-                            // if there is no new channel for that message types, just break
                             break;
                         }
                     }

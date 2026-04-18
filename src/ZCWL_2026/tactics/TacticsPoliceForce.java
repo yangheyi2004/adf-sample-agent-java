@@ -76,7 +76,7 @@ public class TacticsPoliceForce extends adf.core.component.tactics.TacticsPolice
             case NON_PRECOMPUTE:
                 this.search = moduleManager.getModule(
                     "TacticsPoliceForce.MySearch",
-                    "ZCWL_2026.module.complex.Search");
+                    "ZCWL_2026.module.complex.MySearch");
                 this.roadDetector = moduleManager.getModule(
                     "TacticsPoliceForce.RoadDetector",
                     "ZCWL_2026.module.complex.RoadDetector");

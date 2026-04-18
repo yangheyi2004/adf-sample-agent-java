@@ -16,24 +16,28 @@ import rescuecore2.worldmodel.EntityID;
 import java.util.*;
 import static rescuecore2.standard.entities.StandardEntityURN.*;
 
-/**
- * 人员检测器 - 只负责检测和报告，不负责分配任务
- */
 public class HumanDetector extends adf.core.component.module.complex.HumanDetector {
 
     private Clustering clustering;
     private EntityID result;
     private MessageManager msgManager;
     private Set<EntityID> reportedVictims;
+    private Set<EntityID> knownBuriedVictims;      // 消防车：已知被掩埋的单位（包括平民和其他智能体）
+    private Set<EntityID> knownUnburiedVictims;    // 救护车：已挖出待装载的伤员（仅平民）
     private StandardEntityURN agentType;
-    private Set<EntityID> knownVictims;
+    
+    private int lastLogTime;
+    private static final int LOG_INTERVAL = 10;
+    private Set<EntityID> loggedCivilianMessages = new HashSet<>();
 
     public HumanDetector(AgentInfo ai, WorldInfo wi, ScenarioInfo si,
                          ModuleManager mm, DevelopData dd) {
         super(ai, wi, si, mm, dd);
-        this.knownVictims = new HashSet<>();
+        this.knownBuriedVictims = new HashSet<>();
+        this.knownUnburiedVictims = new HashSet<>();
         this.reportedVictims = new HashSet<>();
         this.agentType = ai.me().getStandardURN();
+        this.lastLogTime = 0;
 
         switch (si.getMode()) {
             case PRECOMPUTATION_PHASE:
@@ -45,10 +49,6 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                 break;
         }
         registerModule(this.clustering);
-        
-        String name = agentType == FIRE_BRIGADE ? "消防车" : 
-                      (agentType == AMBULANCE_TEAM ? "救护车" : "警车");
-        System.err.println("[" + name + "] 人员检测器已加载");
     }
 
     @Override
@@ -56,183 +56,365 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
         super.updateInfo(mm);
         this.msgManager = mm;
         
-        for (CommunicationMessage msg : mm.getReceivedMessageList()) {
-            if (msg instanceof MessageCivilian) {
-                MessageCivilian mc = (MessageCivilian) msg;
-                if (this.agentType != AMBULANCE_TEAM && mc.isBuriednessDefined() && mc.getBuriedness() > 0) {
-                    knownVictims.add(mc.getAgentID());
-                }
-            } else if (msg instanceof MessagePoliceForce) {
-                MessagePoliceForce mpf = (MessagePoliceForce) msg;
-                if (this.agentType != AMBULANCE_TEAM && mpf.isBuriednessDefined() && mpf.getBuriedness() > 0) {
-                    knownVictims.add(mpf.getAgentID());
-                }
-            } else if (msg instanceof MessageFireBrigade) {
-                MessageFireBrigade mfb = (MessageFireBrigade) msg;
-                if (this.agentType != AMBULANCE_TEAM && mfb.isBuriednessDefined() && mfb.getBuriedness() > 0) {
-                    knownVictims.add(mfb.getAgentID());
-                }
-            } else if (msg instanceof MessageAmbulanceTeam) {
-                MessageAmbulanceTeam mat = (MessageAmbulanceTeam) msg;
-                if (this.agentType != AMBULANCE_TEAM && mat.isBuriednessDefined() && mat.getBuriedness() > 0) {
-                    knownVictims.add(mat.getAgentID());
+        // ========== 主动扫描世界变化 ==========
+        if (this.agentType == FIRE_BRIGADE) {
+            for (EntityID id : worldInfo.getChanged().getChangedEntities()) {
+                StandardEntity e = worldInfo.getEntity(id);
+                if (e instanceof Civilian) {
+                    Civilian c = (Civilian) e;
+                    if (c.isHPDefined() && c.getHP() > 0 
+                        && c.isBuriednessDefined() && c.getBuriedness() > 0
+                        && c.isPositionDefined()) {
+                        if (knownBuriedVictims.add(c.getID())) {
+                            System.err.println("[HumanDetector] 世界变化扫描发现被掩埋平民: " + c.getID() +
+                                               " 于建筑 " + c.getPosition());
+                        }
+                    }
                 }
             }
         }
         
-        cleanupKnownVictims();
+        // ========== 救护车：主动扫描被挖出的平民 ==========
+        if (this.agentType == AMBULANCE_TEAM) {
+            for (EntityID id : worldInfo.getChanged().getChangedEntities()) {
+                StandardEntity e = worldInfo.getEntity(id);
+                if (e instanceof Civilian) {
+                    Civilian c = (Civilian) e;
+                    // 已挖出且受伤的平民加入待装载列表
+                    if (c.isHPDefined() && c.getHP() > 0 
+                        && c.isBuriednessDefined() && c.getBuriedness() == 0
+                        && c.isDamageDefined() && c.getDamage() > 0
+                        && c.isPositionDefined()) {
+                        if (knownUnburiedVictims.add(c.getID())) {
+                            System.err.println("[HumanDetector] 救护车扫描到已挖出伤员: " + c.getID() +
+                                               " 伤害=" + c.getDamage() + " 位置=" + c.getPosition());
+                        }
+                    }
+                }
+            }
+        }
+        
+        // ========== 处理接收到的消息 ==========
+        List<CommunicationMessage> messages = mm.getReceivedMessageList();
+        for (CommunicationMessage msg : messages) {
+            if (msg instanceof MessageCivilian) {
+                MessageCivilian mc = (MessageCivilian) msg;
+                EntityID victimId = mc.getAgentID();
+                String source = mc.isRadio() ? "语音" : "无线";
+                
+                if (this.agentType == FIRE_BRIGADE && !loggedCivilianMessages.contains(victimId)) {
+                    /*System.err.println("[HumanDetector] 收到 MessageCivilian [" + source + "]: agent=" + victimId + 
+                                       ", buriedness=" + (mc.isBuriednessDefined() ? mc.getBuriedness() : "undefined") +
+                                       ", damage=" + (mc.isDamageDefined() ? mc.getDamage() : "undefined") +
+                                       ", position=" + mc.getPosition() +
+                                       ", HP=" + (mc.isHPDefined() ? mc.getHP() : "undefined"));
+                    loggedCivilianMessages.add(victimId);*/
+                }
+                processCivilianMessage(mc);
+                
+            } else if (msg instanceof MessageFireBrigade) {
+                processFireBrigadeMessage((MessageFireBrigade) msg);
+            } else if (msg instanceof MessagePoliceForce) {
+                MessagePoliceForce mpf = (MessagePoliceForce) msg;
+                if (this.agentType == FIRE_BRIGADE && mpf.isBuriednessDefined() && mpf.getBuriedness() > 0) {
+                    knownBuriedVictims.add(mpf.getAgentID());
+                    scanBuildingForVictims(mpf.getPosition());
+                }
+            } else if (msg instanceof MessageAmbulanceTeam) {
+                MessageAmbulanceTeam mat = (MessageAmbulanceTeam) msg;
+                if (this.agentType == FIRE_BRIGADE && mat.isBuriednessDefined() && mat.getBuriedness() > 0) {
+                    knownBuriedVictims.add(mat.getAgentID());
+                    scanBuildingForVictims(mat.getPosition());
+                }
+            }
+        }
+        
+        cleanupVictims();
+        
+        int currentTime = this.agentInfo.getTime();
+        if (currentTime - lastLogTime >= LOG_INTERVAL) {
+            lastLogTime = currentTime;
+            logPendingVictims();
+        }
+        
         return this;
     }
     
-    private void cleanupKnownVictims() {
-        List<EntityID> toRemove = new ArrayList<>();
-        for (EntityID victimId : knownVictims) {
-            Human victim = (Human) this.worldInfo.getEntity(victimId);
-            if (victim == null) {
-                toRemove.add(victimId);
-            } else if (victim.isHPDefined() && victim.getHP() == 0) {
-                toRemove.add(victimId);
-            } else if (victim.isBuriednessDefined() && victim.getBuriedness() == 0) {
-                toRemove.add(victimId);
+    private void processCivilianMessage(MessageCivilian mc) {
+        EntityID victimId = mc.getAgentID();
+        if (mc.isHPDefined() && mc.getHP() == 0) {
+            return;
+        }
+        boolean isBuried = mc.isBuriednessDefined() && mc.getBuriedness() > 0;
+        boolean hasDamage = mc.isDamageDefined() && mc.getDamage() > 0;
+        
+        if (this.agentType == AMBULANCE_TEAM) {
+            // 救护车只关心已挖出且受伤的平民
+            if (!isBuried && hasDamage) {
+                StandardEntity e = worldInfo.getEntity(victimId);
+                if (e instanceof Civilian) {
+                    knownUnburiedVictims.add(victimId);
+                }
+            }
+        } else if (this.agentType == FIRE_BRIGADE) {
+            // 消防车关心所有被掩埋的单位
+            if (isBuried) {
+                knownBuriedVictims.add(victimId);
+                if (mc.isPositionDefined()) {
+                    scanBuildingForVictims(mc.getPosition());
+                }
             }
         }
-        knownVictims.removeAll(toRemove);
     }
     
-    /**
-     * 检查实体是否有效（位置定义且不为null）
-     */
-    private boolean isValidEntity(StandardEntity entity) {
-        if (entity == null) return false;
-        if (entity instanceof Human) {
-            Human h = (Human) entity;
-            if (!h.isPositionDefined()) return false;
-            EntityID pos = h.getPosition();
-            if (pos == null) return false;
-            StandardEntity posEntity = this.worldInfo.getEntity(pos);
-            if (posEntity == null) return false;
+    private void processFireBrigadeMessage(MessageFireBrigade mfb) {
+        if (this.agentType != FIRE_BRIGADE) return;
+        if (mfb.isBuriednessDefined() && mfb.getBuriedness() > 0) {
+            knownBuriedVictims.add(mfb.getAgentID());
+            scanBuildingForVictims(mfb.getPosition());
         }
-        return true;
+        if (mfb.getAction() == MessageFireBrigade.ACTION_RESCUE && mfb.getTargetID() != null) {
+            scanBuildingForVictims(mfb.getTargetID());
+        }
+    }
+    
+    private void scanBuildingForVictims(EntityID buildingId) {
+        if (buildingId == null) return;
+        StandardEntity entity = worldInfo.getEntity(buildingId);
+        if (!(entity instanceof Building)) return;
+        Collection<StandardEntity> entities = worldInfo.getObjectsInRange(buildingId, 0);
+        for (StandardEntity e : entities) {
+            if (e instanceof Civilian) {
+                Civilian c = (Civilian) e;
+                if (c.isPositionDefined() && c.getPosition().equals(buildingId)) {
+                    if (c.isHPDefined() && c.getHP() > 0 && c.isBuriednessDefined() && c.getBuriedness() > 0) {
+                        knownBuriedVictims.add(c.getID());
+                    }
+                }
+            }
+        }
+    }
+    
+    private void logPendingVictims() {
+        String agentName = (this.agentType == FIRE_BRIGADE) ? "消防车" : "救护车";
+        if (this.agentType == FIRE_BRIGADE) {
+            /*System.err.println("[" + agentName + " ID:" + this.agentInfo.getID() + 
+                               "] 📊 待救援: 被掩埋=" + knownBuriedVictims.size());*/
+        } else {
+            /*System.err.println("[" + agentName + " ID:" + this.agentInfo.getID() + 
+                               "] 📊 待装载: 已挖出=" + knownUnburiedVictims.size());*/
+        }
+    }
+    
+    private void cleanupVictims() {
+        // 清理已挖出伤员列表
+        List<EntityID> toRemove = new ArrayList<>();
+        for (EntityID vid : knownUnburiedVictims) {
+            Human victim = (Human) worldInfo.getEntity(vid);
+            if (victim == null) {
+                toRemove.add(vid);
+                continue;
+            }
+            if (victim.isHPDefined() && victim.getHP() == 0) {
+                toRemove.add(vid);
+                continue;
+            }
+            if (victim.isDamageDefined() && victim.getDamage() == 0) {
+                toRemove.add(vid);
+                continue;
+            }
+            if (!victim.isPositionDefined()) {
+                toRemove.add(vid);
+                continue;
+            }
+            EntityID pos = victim.getPosition();
+            if (pos == null) {
+                toRemove.add(vid);
+                continue;
+            }
+            StandardEntity posEntity = worldInfo.getEntity(pos);
+            if (posEntity != null && posEntity.getStandardURN() == REFUGE) {
+                toRemove.add(vid);
+            }
+        }
+        knownUnburiedVictims.removeAll(toRemove);
+        
+        // 清理掩埋目标列表
+        toRemove.clear();
+        for (EntityID vid : knownBuriedVictims) {
+            Human victim = (Human) worldInfo.getEntity(vid);
+            if (victim == null) {
+                toRemove.add(vid);
+                continue;
+            }
+            if (victim.isHPDefined() && victim.getHP() == 0) {
+                toRemove.add(vid);
+                continue;
+            }
+            if (victim.isBuriednessDefined() && victim.getBuriedness() == 0) {
+                toRemove.add(vid);
+            }
+        }
+        knownBuriedVictims.removeAll(toRemove);
     }
 
     @Override
     public HumanDetector calc() {
         this.result = null;
         
-        // ========== 救护车专用 ==========
         if (this.agentType == AMBULANCE_TEAM) {
-            EntityID currentPos = this.agentInfo.getPosition();
-            Collection<StandardEntity> entitiesInRange = this.worldInfo.getObjectsInRange(currentPos, 100);
-            
-            for (StandardEntity e : entitiesInRange) {
-                if (e instanceof Human) {
-                    Human human = (Human) e;
-                    EntityID humanId = human.getID();
-                    
-                    // ========== 关键修复：检查位置是否有效 ==========
-                    if (!human.isPositionDefined()) {
-                        continue;
-                    }
-                    EntityID humanPos = human.getPosition();
-                    if (humanPos == null) {
-                        continue;
-                    }
-                    if (!humanPos.equals(currentPos)) {
-                        continue;
-                    }
-                    
-                    boolean isBuried = human.isBuriednessDefined() && human.getBuriedness() > 0;
-                    boolean hasDamage = human.isDamageDefined() && human.getDamage() > 0;
-                    
-                    if (isBuried) {
-                        if (!reportedVictims.contains(humanId)) {
-                            sendReportMessage(human);
-                            reportedVictims.add(humanId);
-                        }
-                        continue;
-                    } else if (hasDamage) {
-                        this.result = humanId;
+            // ========== 救护车：只处理已挖出伤员 ==========
+            if (!knownUnburiedVictims.isEmpty()) {
+                Set<EntityID> validTargets = new HashSet<>();
+                for (EntityID vid : knownUnburiedVictims) {
+                    Human h = (Human) worldInfo.getEntity(vid);
+                    if (h == null) continue;
+                    if (!(h instanceof Civilian)) continue; // 只装载平民
+                    if (h.isHPDefined() && h.getHP() == 0) continue;
+                    if (!h.isPositionDefined()) continue;
+                    EntityID pos = h.getPosition();
+                    if (pos == null) continue;
+                    StandardEntity posEntity = worldInfo.getEntity(pos);
+                    if (posEntity != null && posEntity.getStandardURN() == REFUGE) continue;
+                    if (h.isDamageDefined() && h.getDamage() == 0) continue;
+                    validTargets.add(vid);
+                }
+                if (!validTargets.isEmpty()) {
+                    EntityID nearest = findNearestVictim(validTargets);
+                    if (nearest != null) {
+                        this.result = nearest;
+                        System.err.println("[救护车] 选择已挖出伤员: " + nearest);
                         return this;
                     }
                 }
             }
             
-            if (this.result == null && !knownVictims.isEmpty()) {
-                EntityID nearest = findNearestKnownVictim();
-                if (nearest != null) {
-                    this.result = nearest;
-                    return this;
+            // 身边直接发现的伤员
+            EntityID currentPos = this.agentInfo.getPosition();
+            Collection<StandardEntity> entitiesInRange = this.worldInfo.getObjectsInRange(currentPos, 100);
+            for (StandardEntity e : entitiesInRange) {
+                if (e instanceof Civilian) {
+                    Civilian c = (Civilian) e;
+                    EntityID humanId = c.getID();
+                    if (!c.isPositionDefined() || !c.getPosition().equals(currentPos)) continue;
+                    boolean isBuried = c.isBuriednessDefined() && c.getBuriedness() > 0;
+                    boolean hasDamage = c.isDamageDefined() && c.getDamage() > 0;
+                    if (isBuried) {
+                        // 向消防车上报
+                        if (!reportedVictims.contains(humanId)) {
+                            sendReportMessage(c);
+                            reportedVictims.add(humanId);
+                        }
+                        continue;
+                    } else if (hasDamage) {
+                        EntityID pos = c.getPosition();
+                        if (pos != null) {
+                            StandardEntity posEntity = worldInfo.getEntity(pos);
+                            if (posEntity != null && posEntity.getStandardURN() == REFUGE) {
+                                continue;
+                            }
+                        }
+                        this.result = humanId;
+                        System.err.println("[救护车] 发现身边伤员: " + humanId);
+                        return this;
+                    }
                 }
             }
+            return this;
         }
         
-        // ========== 消防员专用 ==========
+        // ========== 消防车逻辑（无锁定，每步重新选择最近目标） ==========
         if (this.agentType == FIRE_BRIGADE) {
-            if (!knownVictims.isEmpty()) {
-                EntityID nearest = findNearestKnownVictim();
-                if (nearest != null) {
-                    this.result = nearest;
+            if (!knownBuriedVictims.isEmpty()) {
+                Set<EntityID> civilians = new HashSet<>();
+                for (EntityID vid : knownBuriedVictims) {
+                    Human h = (Human) worldInfo.getEntity(vid);
+                    if (h instanceof Civilian) {
+                        civilians.add(vid);
+                    }
+                }
+                EntityID best;
+                if (!civilians.isEmpty()) {
+                    best = findNearestVictim(civilians);
+                    /*System.err.println("[消防车] 选择最近的被掩埋平民: " + best);*/
+                } else {
+                    best = findNearestVictim(knownBuriedVictims);
+                    Human victim = (Human) worldInfo.getEntity(best);
+                    String type = (victim instanceof FireBrigade) ? "消防车" :
+                                  (victim instanceof PoliceForce) ? "警车" : "救护车";
+                    /*System.err.println("[消防车] 无平民，选择最近的 " + type + ": " + best);*/
+                }
+                if (best != null) {
+                    this.result = best;
+                    Human victim = (Human) worldInfo.getEntity(best);
+                    if (!reportedVictims.contains(best)) {
+                        sendReportMessage(victim);
+                        reportedVictims.add(best);
+                    }
                     return this;
                 }
             }
             
-            if (this.result == null) {
-                if (clustering == null) {
+            // 没有已知掩埋目标，使用聚类或全局搜索
+            if (clustering == null) {
+                this.result = this.calcTargetInWorld();
+            } else {
+                this.result = this.calcTargetInCluster(clustering);
+                if (this.result == null) {
                     this.result = this.calcTargetInWorld();
-                } else {
-                    this.result = this.calcTargetInCluster(clustering);
-                    if (this.result == null) {
-                        this.result = this.calcTargetInWorld();
-                    }
                 }
             }
-            
-            if (this.result != null && this.msgManager != null && !reportedVictims.contains(this.result)) {
-                Human h = (Human) this.worldInfo.getEntity(this.result);
-                if (h != null && h.isBuriednessDefined() && h.getBuriedness() > 0) {
-                    // ========== 检查位置有效性再发送 ==========
-                    if (h.isPositionDefined() && h.getPosition() != null) {
-                        sendReportMessage(h);
-                        reportedVictims.add(this.result);
-                    }
+            if (this.result != null) {
+                Human h = (Human) worldInfo.getEntity(this.result);
+                if (h != null && !reportedVictims.contains(this.result)) {
+                    sendReportMessage(h);
+                    reportedVictims.add(this.result);
                 }
             }
         }
-        
         return this;
+    }
+    
+    private double getDistanceToVictim(EntityID victimId) {
+        Human h = (Human) worldInfo.getEntity(victimId);
+        if (h == null || !h.isPositionDefined()) return Double.MAX_VALUE;
+        EntityID hPos = h.getPosition();
+        if (hPos == null) return Double.MAX_VALUE;
+        return this.worldInfo.getDistance(this.agentInfo.getPosition(), hPos);
+    }
+    
+    private EntityID findNearestVictim(Set<EntityID> victimSet) {
+        EntityID nearest = null;
+        double minDist = Double.MAX_VALUE;
+        for (EntityID vid : victimSet) {
+            double dist = getDistanceToVictim(vid);
+            if (dist < minDist) {
+                minDist = dist;
+                nearest = vid;
+            }
+        }
+        return nearest;
     }
     
     private void sendReportMessage(Human human) {
         if (this.msgManager == null) return;
-        
-        // ========== 关键修复：发送前检查位置有效性 ==========
-        if (!human.isPositionDefined()) {
-            System.err.println("[HumanDetector] 警告: 无法发送报告，平民 " + human.getID() + " 位置未定义");
-            return;
-        }
+        if (!human.isPositionDefined()) return;
         EntityID pos = human.getPosition();
-        if (pos == null) {
-            System.err.println("[HumanDetector] 警告: 无法发送报告，平民 " + human.getID() + " 位置为 null");
-            return;
-        }
-        
+        if (pos == null) return;
         if (human instanceof Civilian) {
             MessageCivilian msg = new MessageCivilian(true, (Civilian) human);
             this.msgManager.addMessage(msg);
         } else if (human instanceof PoliceForce) {
             MessagePoliceForce msg = new MessagePoliceForce(true, (PoliceForce) human, 
-                                                           MessagePoliceForce.ACTION_REST, 
-                                                           human.getPosition());
+                                                           MessagePoliceForce.ACTION_REST, pos);
             this.msgManager.addMessage(msg);
         } else if (human instanceof FireBrigade) {
             MessageFireBrigade msg = new MessageFireBrigade(true, (FireBrigade) human, 
-                                                            MessageFireBrigade.ACTION_REST, 
-                                                            human.getPosition());
+                                                            MessageFireBrigade.ACTION_REST, pos);
             this.msgManager.addMessage(msg);
         } else if (human instanceof AmbulanceTeam) {
             MessageAmbulanceTeam msg = new MessageAmbulanceTeam(true, (AmbulanceTeam) human, 
-                                                                MessageAmbulanceTeam.ACTION_REST, 
-                                                                human.getPosition());
+                                                                MessageAmbulanceTeam.ACTION_REST, pos);
             this.msgManager.addMessage(msg);
         }
     }
@@ -241,149 +423,63 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
         int clusterIndex = clustering.getClusterIndex(this.agentInfo.getID());
         Collection<StandardEntity> elements = clustering.getClusterEntities(clusterIndex);
         if (elements == null || elements.isEmpty()) return null;
-
-        List<Human> targets = new ArrayList<>();
-        
+        Set<EntityID> civilians = new HashSet<>();
+        Set<EntityID> others = new HashSet<>();
         for (StandardEntity next : this.worldInfo.getEntitiesOfType(CIVILIAN, POLICE_FORCE, 
                                                                     FIRE_BRIGADE, AMBULANCE_TEAM)) {
             Human h = (Human) next;
-            // ========== 检查位置有效性 ==========
             if (!h.isPositionDefined()) continue;
             EntityID hPos = h.getPosition();
             if (hPos == null) continue;
-            
             StandardEntity positionEntity = this.worldInfo.getPosition(h);
             if (positionEntity != null && elements.contains(positionEntity)) {
-                if (h.isHPDefined() && h.getHP() > 0) {
-                    if (h.isBuriednessDefined() && h.getBuriedness() > 0) {
-                        targets.add(h);
-                    } else if (agentType == AMBULANCE_TEAM && h.isDamageDefined() && h.getDamage() > 0) {
-                        targets.add(h);
+                if (h.isHPDefined() && h.getHP() > 0 && h.isBuriednessDefined() && h.getBuriedness() > 0) {
+                    if (h instanceof Civilian) {
+                        civilians.add(h.getID());
+                    } else {
+                        others.add(h.getID());
                     }
                 }
             }
         }
-        
-        if (!targets.isEmpty()) {
-            targets.sort(new DistanceSorter(this.worldInfo, this.agentInfo.me()));
-            return targets.get(0).getID();
+        if (!civilians.isEmpty()) {
+            return findNearestVictim(civilians);
+        } else if (!others.isEmpty()) {
+            return findNearestVictim(others);
         }
         return null;
     }
 
     private EntityID calcTargetInWorld() {
-        List<Human> targets = new ArrayList<>();
-        
+        Set<EntityID> civilians = new HashSet<>();
+        Set<EntityID> others = new HashSet<>();
         for (StandardEntity next : this.worldInfo.getEntitiesOfType(CIVILIAN, POLICE_FORCE, 
                                                                     FIRE_BRIGADE, AMBULANCE_TEAM)) {
             Human h = (Human) next;
-            // ========== 检查位置有效性 ==========
             if (!h.isPositionDefined()) continue;
-            EntityID hPos = h.getPosition();
-            if (hPos == null) continue;
-            
-            StandardEntity positionEntity = this.worldInfo.getPosition(h);
-            if (positionEntity != null) {
-                if (h.isHPDefined() && h.getHP() > 0) {
-                    if (h.isBuriednessDefined() && h.getBuriedness() > 0) {
-                        targets.add(h);
-                    } else if (agentType == AMBULANCE_TEAM && h.isDamageDefined() && h.getDamage() > 0) {
-                        targets.add(h);
-                    }
+            if (h.isHPDefined() && h.getHP() > 0 && h.isBuriednessDefined() && h.getBuriedness() > 0) {
+                if (h instanceof Civilian) {
+                    civilians.add(h.getID());
+                } else {
+                    others.add(h.getID());
                 }
             }
         }
-        
-        if (!targets.isEmpty()) {
-            targets.sort(new DistanceSorter(this.worldInfo, this.agentInfo.me()));
-            return targets.get(0).getID();
+        if (!civilians.isEmpty()) {
+            return findNearestVictim(civilians);
+        } else if (!others.isEmpty()) {
+            return findNearestVictim(others);
         }
         return null;
     }
 
-    private EntityID findNearestKnownVictim() {
-    EntityID pos = this.agentInfo.getPosition();
-    EntityID nearest = null;
-    double minDist = Double.MAX_VALUE;
-    List<EntityID> toRemove = new ArrayList<>();
-    
-    for (EntityID vid : knownVictims) {
-        Human h = (Human) this.worldInfo.getEntity(vid);
-        
-        // ========== 检查平民是否还有效 ==========
-        if (h == null) {
-            toRemove.add(vid);
-            continue;
-        }
-        
-        // 已死亡
-        if (h.isHPDefined() && h.getHP() == 0) {
-            toRemove.add(vid);
-            continue;
-        }
-        
-        // 已被救出（埋压度为0）
-        if (h.isBuriednessDefined() && h.getBuriedness() == 0) {
-            toRemove.add(vid);
-            continue;
-        }
-        
-        // ========== 关键修复：检查位置是否有效 ==========
-        if (!h.isPositionDefined()) {
-            toRemove.add(vid);  // 位置无效，说明已被装载
-            System.err.println("[人员检测器] 平民 " + vid + " 位置无效，从列表中移除");
-            continue;
-        }
-        
-        EntityID hPos = h.getPosition();
-        if (hPos == null) {
-            toRemove.add(vid);
-            continue;
-        }
-        
-        double dist = this.worldInfo.getDistance(pos, hPos);
-        if (dist < minDist) {
-            minDist = dist;
-            nearest = vid;
-        }
-    }
-    knownVictims.removeAll(toRemove);
-    return nearest;
-}
-
     @Override
-    public EntityID getTarget() { 
-        return this.result; 
-    }
+    public EntityID getTarget() { return this.result; }
     
     @Override
-    public HumanDetector precompute(PrecomputeData pd) { 
-        return this; 
-    }
-    
+    public HumanDetector precompute(PrecomputeData pd) { return this; }
     @Override
-    public HumanDetector resume(PrecomputeData pd) { 
-        return this; 
-    }
-    
+    public HumanDetector resume(PrecomputeData pd) { return this; }
     @Override
-    public HumanDetector preparate() { 
-        return this; 
-    }
-
-    private class DistanceSorter implements Comparator<StandardEntity> {
-        private StandardEntity reference;
-        private WorldInfo worldInfo;
-
-        DistanceSorter(WorldInfo wi, StandardEntity reference) {
-            this.reference = reference;
-            this.worldInfo = wi;
-        }
-
-        public int compare(StandardEntity a, StandardEntity b) {
-            int d1 = this.worldInfo.getDistance(this.reference, a);
-            int d2 = this.worldInfo.getDistance(this.reference, b);
-            return d1 - d2;
-        }
-    }
+    public HumanDetector preparate() { return this; }
 }

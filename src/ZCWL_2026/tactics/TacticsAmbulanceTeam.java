@@ -86,7 +86,7 @@ public class TacticsAmbulanceTeam extends adf.core.component.tactics.TacticsAmbu
                     "ZCWL_2026.module.complex.HumanDetector");
                 this.search = moduleManager.getModule(
                     "TacticsAmbulanceTeam.Search", 
-                    "ZCWL_2026.module.complex.Search");
+                    "ZCWL_2026.module.complex.MySearch");
                 this.actionTransport = moduleManager.getExtAction(
                     "TacticsAmbulanceTeam.ActionTransport", 
                     "ZCWL_2026.extraction.AmbulanceExtAction");

@@ -73,7 +73,7 @@ public class FireCommandExecutor extends adf.core.component.centralized.CommandE
                 break;
         }
         
-        System.err.println("[消防车执行器] ID:" + ai.getID() + " 已加载（整合版）");
+        //System.err.println("[消防车执行器] ID:" + ai.getID() + " 已加载（整合版）");
     }
 
     @Override

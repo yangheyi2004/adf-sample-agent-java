@@ -49,6 +49,10 @@ public class FireExtAction extends ExtAction {
     private EntityID lastTarget;
     private int noProgressCounter;
 
+    // ========== 新增：记录上一个周期目标的状态，用于检测救援完成 ==========
+    private EntityID previousTarget;
+    private boolean wasBuriedLastCheck;
+
     public FireExtAction(AgentInfo agentInfo, WorldInfo worldInfo, ScenarioInfo scenarioInfo,
                          ModuleManager moduleManager, DevelopData developData) {
         super(agentInfo, worldInfo, scenarioInfo, moduleManager, developData);
@@ -62,6 +66,9 @@ public class FireExtAction extends ExtAction {
         this.stuckCounter = 0;
         this.lastTarget = null;
         this.noProgressCounter = 0;
+        
+        this.previousTarget = null;
+        this.wasBuriedLastCheck = false;
         
         this.maxExtinguishDistance = scenarioInfo.getFireExtinguishMaxDistance();
         this.maxExtinguishPower = scenarioInfo.getFireExtinguishMaxSum();
@@ -78,8 +85,6 @@ public class FireExtAction extends ExtAction {
                         "ZCWL_2026.module.algorithm.PathPlanning");
                 break;
         }
-        
-        System.err.println("[消防车] ID:" + agentInfo.getID() + " 统一动作模块已加载");
     }
 
     @Override
@@ -94,6 +99,11 @@ public class FireExtAction extends ExtAction {
     @Override
     public ExtAction setTarget(EntityID target) {
         this.target = target;
+        // 重置状态追踪
+        if (target != null && !target.equals(previousTarget)) {
+            previousTarget = target;
+            wasBuriedLastCheck = isTargetBuried(target);
+        }
         return this;
     }
 
@@ -111,6 +121,9 @@ public class FireExtAction extends ExtAction {
         if (hasNoProgress()) {
             this.target = null;
         }
+
+        // ========== 新增：检测救援完成并发送通知 ==========
+        checkAndNotifyRescueCompletion();
 
         if (this.needRest(agent)) {
             this.result = this.calcRefugeAction(agent, this.pathPlanning, this.target);
@@ -139,6 +152,47 @@ public class FireExtAction extends ExtAction {
         return this;
     }
     
+    // ==================== 新增方法：检测救援完成并发送通知 ====================
+    private void checkAndNotifyRescueCompletion() {
+        if (target == null || msgManager == null) return;
+        
+        StandardEntity entity = worldInfo.getEntity(target);
+        if (!(entity instanceof Civilian)) return;
+        
+        Civilian civilian = (Civilian) entity;
+        boolean isCurrentlyBuried = civilian.isBuriednessDefined() && civilian.getBuriedness() > 0;
+        
+        // 检测从掩埋变为非掩埋（救援完成）
+        if (wasBuriedLastCheck && !isCurrentlyBuried) {
+            // 发送语音消息通知救护车
+            MessageCivilian msg = new MessageCivilian(true, civilian);
+            msgManager.addMessage(msg);
+            System.err.println("[消防车] 🎉 救援完成！平民 " + target + " 已挖出，发送语音通知救护车");
+            
+            // 可选：也通过消防车动作消息广播
+            FireBrigade me = (FireBrigade) agentInfo.me();
+            MessageFireBrigade actionMsg = new MessageFireBrigade(
+                    true, me, MessageFireBrigade.ACTION_REST, me.getPosition());
+            msgManager.addMessage(actionMsg);
+        }
+        
+        // 更新状态
+        wasBuriedLastCheck = isCurrentlyBuried;
+        if (!target.equals(previousTarget)) {
+            previousTarget = target;
+        }
+    }
+    
+    private boolean isTargetBuried(EntityID targetId) {
+        if (targetId == null) return false;
+        StandardEntity entity = worldInfo.getEntity(targetId);
+        if (entity instanceof Civilian) {
+            Civilian c = (Civilian) entity;
+            return c.isBuriednessDefined() && c.getBuriedness() > 0;
+        }
+        return false;
+    }
+    
     // ==================== 防卡死方法 ====================
     
     private boolean isStuck() {
@@ -148,7 +202,14 @@ public class FireExtAction extends ExtAction {
             stuckCounter++;
             if (stuckCounter > MAX_STUCK_COUNT) {
                 System.err.println("[消防车] ID:" + this.agentInfo.getID() + 
-                                   " ⚠️ 卡住超过 " + MAX_STUCK_COUNT + " 步，重置状态");
+                                   " ⚠️ 卡住超过 " + MAX_STUCK_COUNT + " 步，请求清理当前位置");
+                StandardEntity posEntity = this.worldInfo.getEntity(currentPos);
+                if (posEntity instanceof Road) {
+                    Road road = (Road) posEntity;
+                    if (!road.isBlockadesDefined() || !road.getBlockades().isEmpty()) {
+                        requestClear(road);
+                    }
+                }
                 stuckCounter = 0;
                 return true;
             }
@@ -329,18 +390,14 @@ public class FireExtAction extends ExtAction {
             return null;
         }
         
-        // ========== 检查埋压度 ==========
         boolean isBuried = targetHuman.isBuriednessDefined() && targetHuman.getBuriedness() > 0;
         boolean isUnburied = targetHuman.isBuriednessDefined() && targetHuman.getBuriedness() == 0;
         
-        // 如果埋压度为0，说明已被挖出，不需要救援
         if (isUnburied) {
-            System.err.println("[消防车] ✅ 平民 " + targetID + " 已被挖出，无需救援");
-            // 但如果还有伤害，需要报告给救护车
+            System.err.println("[消防车] ✅ 目标 " + targetID + " 已被挖出，无需救援");
             if (targetHuman.isDamageDefined() && targetHuman.getDamage() > 0 && !reportedVictims.contains(targetID)) {
                 if (isValidVictim(targetHuman)) {
                     reportVictimToAmbulance(targetHuman);
-                    System.err.println("[消防车] 📢 平民已挖出，报告给救护车！");
                 }
             }
             this.target = null;
@@ -348,7 +405,7 @@ public class FireExtAction extends ExtAction {
         }
         
         if (!isBuried) {
-            System.err.println("[消防车] ⚠️ 平民 " + targetID + " 埋压度未定义或为0，放弃");
+            System.err.println("[消防车] ⚠️ 目标 " + targetID + " 埋压度未定义或为0，放弃");
             this.target = null;
             return null;
         }
@@ -401,64 +458,40 @@ public class FireExtAction extends ExtAction {
         return null;
     }
     
-    /**
-     * 报告平民给救护车分配器 - 使用无线消息确保送达
-     */
     private void reportVictimToAmbulance(Human victim) {
         if (this.msgManager == null) {
             System.err.println("[消防车] ❌ msgManager为null，无法报告");
             return;
         }
-        
-        // 避免重复报告
-        if (reportedVictims.contains(victim.getID())) {
-            System.err.println("[消防车] 平民 " + victim.getID() + " 已报告过，跳过");
-            return;
-        }
-        
-        if (!victim.isPositionDefined()) {
-            System.err.println("[消防车] ⚠️ 无法报告，平民 " + victim.getID() + " 位置未定义");
-            return;
-        }
-        
+        if (reportedVictims.contains(victim.getID())) return;
+        if (!victim.isPositionDefined()) return;
         EntityID pos = victim.getPosition();
-        if (pos == null) {
-            System.err.println("[消防车] ⚠️ 无法报告，平民 " + victim.getID() + " 位置为null");
-            return;
-        }
-        
-        // 检查平民是否还有伤害
-        if (victim.isDamageDefined() && victim.getDamage() == 0) {
-            System.err.println("[消防车] 平民 " + victim.getID() + " 已无伤害，无需报告");
-            return;
-        }
+        if (pos == null) return;
+        if (victim.isDamageDefined() && victim.getDamage() == 0) return;
         
         if (victim instanceof Civilian) {
-            // ========== 关键修复：使用无线消息（isRadio = false）确保送达 ==========
             MessageCivilian msg = new MessageCivilian(false, (Civilian) victim);
             this.msgManager.addMessage(msg);
             reportedVictims.add(victim.getID());
-            
-            System.err.println("╔══════════════════════════════════════════════════════════════╗");
-            System.err.println("║  [消防车] 📢 已添加平民报告到消息队列！                      ║");
-            System.err.println("║  平民 ID: " + victim.getID());
-            System.err.println("║  伤害: " + victim.getDamage());
-            System.err.println("║  位置: " + pos);
-            System.err.println("║  消息类型: 无线消息（确保送达）");
-            System.err.println("║  消息队列大小: " + this.msgManager.getSendMessageList().size());
-            System.err.println("╚══════════════════════════════════════════════════════════════╝");
+            System.err.println("[消防车] 📢 已报告已挖出伤员: " + victim.getID());
         }
     }
     
     private boolean hasBlockadeOnPath(EntityID from, EntityID to) {
         List<EntityID> path = this.pathPlanning.getResult(from, to);
-        if (path == null) return true;
-        
+        if (path == null) {
+            EntityID currentPos = this.agentInfo.getPosition();
+            StandardEntity posEntity = this.worldInfo.getEntity(currentPos);
+            if (posEntity instanceof Road) {
+                requestClear((Road) posEntity);
+            }
+            return true;
+        }
         for (EntityID step : path) {
             StandardEntity e = this.worldInfo.getEntity(step);
             if (e instanceof Road) {
                 Road road = (Road) e;
-                if (road.isBlockadesDefined() && !road.getBlockades().isEmpty()) {
+                if (!road.isBlockadesDefined() || !road.getBlockades().isEmpty()) {
                     requestClear(road);
                     return true;
                 }
@@ -469,16 +502,15 @@ public class FireExtAction extends ExtAction {
     
     private void requestClear(Road road) {
         if (this.msgManager == null) return;
-        
         FireBrigade agent = (FireBrigade) this.agentInfo.me();
-        EntityID roadId = road.getID();
-        
         MessageFireBrigade msg = new MessageFireBrigade(
                 true,
                 agent,
                 MessageFireBrigade.ACTION_RESCUE,
-                roadId);
+                road.getID());
         this.msgManager.addMessage(msg);
+        System.err.println("[消防车] 📢 发送开路请求: 道路 " + road.getID() + 
+                           (road.isBlockadesDefined() ? " (有障碍物)" : " (未定义)"));
     }
     
     private Action calcMoveToArea(FireBrigade agent, PathPlanning pathPlanning, EntityID target) {
@@ -537,28 +569,14 @@ public class FireExtAction extends ExtAction {
         }
         return firstResult != null ? new ActionMove(firstResult) : null;
     }
-    
-    private String getTypeName(StandardEntityURN type) {
-        switch (type) {
-            case CIVILIAN: return "平民";
-            case POLICE_FORCE: return "警察";
-            case FIRE_BRIGADE: return "消防员";
-            case AMBULANCE_TEAM: return "救护车";
-            default: return "未知";
-        }
-    }
 
-    // ==================== 内部类 ====================
-    
     private class DistanceSorter implements Comparator<StandardEntity> {
         private StandardEntity reference;
         private WorldInfo worldInfo;
-
         DistanceSorter(WorldInfo wi, StandardEntity reference) {
             this.reference = reference;
             this.worldInfo = wi;
         }
-
         public int compare(StandardEntity a, StandardEntity b) {
             int d1 = this.worldInfo.getDistance(this.reference, a);
             int d2 = this.worldInfo.getDistance(this.reference, b);
@@ -566,20 +584,10 @@ public class FireExtAction extends ExtAction {
         }
     }
 
-    // ==================== 生命周期方法 ====================
-    
     @Override
-    public ExtAction precompute(PrecomputeData pd) { 
-        return this; 
-    }
-    
+    public ExtAction precompute(PrecomputeData pd) { return this; }
     @Override
-    public ExtAction resume(PrecomputeData pd) { 
-        return this; 
-    }
-    
+    public ExtAction resume(PrecomputeData pd) { return this; }
     @Override
-    public ExtAction preparate() { 
-        return this; 
-    }
+    public ExtAction preparate() { return this; }
 }

@@ -5,10 +5,7 @@ import adf.core.component.communication.CommunicationMessage;
 import adf.core.agent.communication.MessageManager;
 import adf.core.agent.communication.standard.bundle.MessageUtil;
 import adf.core.agent.communication.standard.bundle.centralized.CommandPolice;
-import adf.core.agent.communication.standard.bundle.information.MessageAmbulanceTeam;
-import adf.core.agent.communication.standard.bundle.information.MessageFireBrigade;
-import adf.core.agent.communication.standard.bundle.information.MessagePoliceForce;
-import adf.core.agent.communication.standard.bundle.information.MessageRoad;
+import adf.core.agent.communication.standard.bundle.information.*;
 import adf.core.agent.develop.DevelopData;
 import adf.core.agent.info.AgentInfo;
 import adf.core.agent.info.ScenarioInfo;
@@ -29,23 +26,22 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
     private PathPlanning pathPlanning;
     private EntityID result;
 
+    // 已上报过被困平民的建筑（避免重复上报）
+    private Set<EntityID> reportedVictimBuildings;
+
     public RoadDetector(AgentInfo ai, WorldInfo wi, ScenarioInfo si, ModuleManager moduleManager, DevelopData developData) {
         super(ai, wi, si, moduleManager, developData);
         
-        // 初始化路径规划模块
+        this.reportedVictimBuildings = new HashSet<>();
+        
         switch (si.getMode()) {
             case PRECOMPUTATION_PHASE:
-                this.pathPlanning = moduleManager.getModule("RoadDetector.PathPlanning", "ZCWL_2026.module.algorithm.PathPlanning");
-                break;
             case PRECOMPUTED:
-                this.pathPlanning = moduleManager.getModule("RoadDetector.PathPlanning", "ZCWL_2026.module.algorithm.PathPlanning");
-                break;
             case NON_PRECOMPUTE:
                 this.pathPlanning = moduleManager.getModule("RoadDetector.PathPlanning", "ZCWL_2026.module.algorithm.PathPlanning");
                 break;
         }
         registerModule(this.pathPlanning);
-        
         this.result = null;
     }
 
@@ -54,13 +50,11 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
         if (this.result == null) {
             EntityID positionID = this.agentInfo.getPosition();
             
-            // 如果当前位置就是目标区域
             if (this.targetAreas.contains(positionID)) {
                 this.result = positionID;
                 return this;
             }
             
-            // 清理不在目标区域的优先道路
             List<EntityID> removeList = new ArrayList<>(this.priorityRoads.size());
             for (EntityID id : this.priorityRoads) {
                 if (!this.targetAreas.contains(id)) {
@@ -69,7 +63,6 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
             }
             this.priorityRoads.removeAll(removeList);
             
-            // 优先选择优先道路作为目标
             if (this.priorityRoads.size() > 0) {
                 this.pathPlanning.setFrom(positionID);
                 this.pathPlanning.setDestination(this.targetAreas);
@@ -80,7 +73,6 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                 return this;
             }
             
-            // 选择普通目标道路
             this.pathPlanning.setFrom(positionID);
             this.pathPlanning.setDestination(this.targetAreas);
             List<EntityID> path = this.pathPlanning.calc().getResult();
@@ -99,20 +91,15 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
     @Override
     public RoadDetector precompute(PrecomputeData precomputeData) {
         super.precompute(precomputeData);
-        if (this.getCountPrecompute() >= 2) {
-            return this;
-        }
+        if (this.getCountPrecompute() >= 2) return this;
         return this;
     }
 
     @Override
     public RoadDetector resume(PrecomputeData precomputeData) {
         super.resume(precomputeData);
-        if (this.getCountResume() >= 2) {
-            return this;
-        }
+        if (this.getCountResume() >= 2) return this;
         
-        // 初始化目标道路（建筑周边道路）
         this.targetAreas = new HashSet<>();
         for (StandardEntity e : this.worldInfo.getEntitiesOfType(REFUGE, BUILDING, GAS_STATION)) {
             for (EntityID id : ((Building) e).getNeighbours()) {
@@ -123,7 +110,6 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
             }
         }
         
-        // 初始化优先道路（避难所周边道路）
         this.priorityRoads = new HashSet<>();
         for (StandardEntity e : this.worldInfo.getEntitiesOfType(REFUGE)) {
             for (EntityID id : ((Building) e).getNeighbours()) {
@@ -140,11 +126,8 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
     @Override
     public RoadDetector preparate() {
         super.preparate();
-        if (this.getCountPreparate() >= 2) {
-            return this;
-        }
+        if (this.getCountPreparate() >= 2) return this;
         
-        // 初始化目标道路（建筑周边道路）
         this.targetAreas = new HashSet<>();
         for (StandardEntity e : this.worldInfo.getEntitiesOfType(REFUGE, BUILDING, GAS_STATION)) {
             for (EntityID id : ((Building) e).getNeighbours()) {
@@ -155,7 +138,6 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
             }
         }
         
-        // 初始化优先道路（避难所周边道路）
         this.priorityRoads = new HashSet<>();
         for (StandardEntity e : this.worldInfo.getEntitiesOfType(REFUGE)) {
             for (EntityID id : ((Building) e).getNeighbours()) {
@@ -172,9 +154,57 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
     @Override
     public RoadDetector updateInfo(MessageManager messageManager) {
         super.updateInfo(messageManager);
-        if (this.getCountUpdateInfo() >= 2) {
-            return this;
+        if (this.getCountUpdateInfo() >= 2) return this;
+        
+        // ========== 警察视线侦察上报 ==========
+        // 1. 检查世界变化中新增的被掩埋平民
+        for (EntityID id : this.worldInfo.getChanged().getChangedEntities()) {
+            StandardEntity e = this.worldInfo.getEntity(id);
+            if (e instanceof Civilian) {
+                Civilian c = (Civilian) e;
+                if (c.isHPDefined() && c.getHP() > 0 
+                    && c.isBuriednessDefined() && c.getBuriedness() > 0
+                    && c.isPositionDefined()) {
+                    EntityID buildingId = c.getPosition();
+                    if (buildingId != null && !reportedVictimBuildings.contains(buildingId)) {
+                        MessageCivilian msgCivilian = new MessageCivilian(false, c);
+                        messageManager.addMessage(msgCivilian);
+                        reportedVictimBuildings.add(buildingId);
+                        System.err.println("[RoadDetector] 警察 " + this.agentInfo.getID() + 
+                                           " 视野发现被困平民 " + c.getID() + " 于建筑 " + buildingId + "，已上报");
+                    }
+                }
+            }
         }
+        
+        // 2. 检查警察自身所在建筑（刚进入时）
+        EntityID currentPos = this.agentInfo.getPosition();
+        StandardEntity posEntity = this.worldInfo.getEntity(currentPos);
+        if (posEntity instanceof Building) {
+            Building building = (Building) posEntity;
+            if (!reportedVictimBuildings.contains(building.getID())) {
+                boolean found = false;
+                Collection<StandardEntity> entities = this.worldInfo.getObjectsInRange(building.getID(), 0);
+                for (StandardEntity se : entities) {
+                    if (se instanceof Civilian) {
+                        Civilian c = (Civilian) se;
+                        if (c.isPositionDefined() && c.getPosition().equals(building.getID())) {
+                            if (c.isHPDefined() && c.getHP() > 0 && c.isBuriednessDefined() && c.getBuriedness() > 0) {
+                                MessageCivilian msgCivilian = new MessageCivilian(false, c);
+                                messageManager.addMessage(msgCivilian);
+                                found = true;
+                                System.err.println("[RoadDetector] 警察 " + this.agentInfo.getID() + 
+                                                   " 进入建筑 " + building.getID() + " 发现被困平民 " + c.getID() + "，已上报");
+                            }
+                        }
+                    }
+                }
+                if (found) {
+                    reportedVictimBuildings.add(building.getID());
+                }
+            }
+        }
+        // ====================================
         
         // 检查当前目标是否已完成清理
         if (this.result != null) {
@@ -223,9 +253,6 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
         return this;
     }
 
-    /**
-     * 处理道路消息
-     */
     private void reflectMessage(MessageRoad messageRoad, Collection<EntityID> changedEntities) {
         if (messageRoad.isBlockadeDefined() && !changedEntities.contains(messageRoad.getBlockadeID())) {
             MessageUtil.reflectMessage(this.worldInfo, messageRoad);
@@ -235,15 +262,11 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
         }
     }
 
-    /**
-     * 处理救护车消息
-     */
     private void reflectMessage(MessageAmbulanceTeam messageAmbulanceTeam) {
         if (messageAmbulanceTeam.getPosition() == null) {
             return;
         }
         
-        // 救援或装载动作：移除相关建筑周边道路
         if (messageAmbulanceTeam.getAction() == MessageAmbulanceTeam.ACTION_RESCUE ||
             messageAmbulanceTeam.getAction() == MessageAmbulanceTeam.ACTION_LOAD) {
             StandardEntity position = this.worldInfo.getEntity(messageAmbulanceTeam.getPosition());
@@ -251,7 +274,6 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                 this.targetAreas.removeAll(((Building) position).getNeighbours());
             }
         }
-        // 移动动作：添加目标建筑周边道路到优先列表
         else if (messageAmbulanceTeam.getAction() == MessageAmbulanceTeam.ACTION_MOVE) {
             if (messageAmbulanceTeam.getTargetID() == null) {
                 return;
@@ -281,15 +303,11 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
         }
     }
 
-    /**
-     * 处理消防队员消息
-     */
     private void reflectMessage(MessageFireBrigade messageFireBrigade) {
         if (messageFireBrigade.getTargetID() == null) {
             return;
         }
         
-        // 补水动作：添加目标建筑周边道路到优先列表
         if (messageFireBrigade.getAction() == MessageFireBrigade.ACTION_REFILL) {
             StandardEntity target = this.worldInfo.getEntity(messageFireBrigade.getTargetID());
             if (target instanceof Building) {
@@ -306,12 +324,8 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
         }
     }
 
-    /**
-     * 处理警察消息
-     */
     private void reflectMessage(MessagePoliceForce messagePoliceForce) {
         if (messagePoliceForce.getAction() == MessagePoliceForce.ACTION_CLEAR) {
-            // 排除自身消息
             if (messagePoliceForce.getAgentID().getValue() != this.agentInfo.getID().getValue()) {
                 if (messagePoliceForce.isTargetDefined()) {
                     EntityID targetID = messagePoliceForce.getTargetID();
@@ -323,7 +337,6 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                         return;
                     }
 
-                    // 清理区域目标：移除目标并重置当前结果（ID小的让给ID大的）
                     if (entity instanceof Area) {
                         this.targetAreas.remove(targetID);
                         if (this.result != null && this.result.getValue() == targetID.getValue()) {
@@ -332,7 +345,6 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                             }
                         }
                     }
-                    // 清理路障：移除路障所在道路
                     else if (entity.getStandardURN() == BLOCKADE) {
                         EntityID position = ((Blockade) entity).getPosition();
                         this.targetAreas.remove(position);
@@ -347,12 +359,8 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
         }
     }
 
-    /**
-     * 处理警察命令消息
-     */
     private void reflectMessage(CommandPolice commandPolice) {
         boolean flag = false;
-        // 检查命令是否针对当前智能体或广播
         if (commandPolice.isToIDDefined() && this.agentInfo.getID().getValue() == commandPolice.getToID().getValue()) {
             flag = true;
         } else if (commandPolice.isBroadcast()) {
@@ -364,12 +372,10 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                 return;
             }
             StandardEntity target = this.worldInfo.getEntity(commandPolice.getTargetID());
-            // 清理区域：添加到优先列表
             if (target instanceof Area) {
                 this.priorityRoads.add(target.getID());
                 this.targetAreas.add(target.getID());
             }
-            // 清理路障：添加路障所在道路到优先列表
             else if (target.getStandardURN() == BLOCKADE) {
                 Blockade blockade = (Blockade) target;
                 if (blockade.isPositionDefined()) {
