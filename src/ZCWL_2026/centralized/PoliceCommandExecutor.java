@@ -78,13 +78,11 @@ public class PoliceCommandExecutor extends CommandExecutor<CommandPolice> {
                 //System.err.printf("[警察执行器] 警察 ID=%s 接受清理命令: 道路=%s%n", myId, currentTarget);
             } else if (command.getAction() == CommandPolice.ACTION_MOVE && command.getTargetID() != null) {
                 currentTarget = command.getTargetID();
-                System.err.printf("[警察执行器] 警察 ID=%s 接受移动命令: 目标=%s%n", myId, currentTarget);
+                //System.err.printf("[警察执行器] 警察 ID=%s 接受移动命令: 目标=%s%n", myId, currentTarget);
             } else if (command.getAction() == CommandPolice.ACTION_REST) {
                 currentTarget = null;
-                System.err.printf("[警察执行器] 警察 ID=%s 接受休息命令%n", myId);
+                //System.err.printf("[警察执行器] 警察 ID=%s 接受休息命令%n", myId);
             }
-        } else {
-            System.err.printf("[警察执行器] 警察 ID=%s 忽略命令 (目标不匹配)%n", myId);
         }
         return this;
     }
@@ -107,10 +105,15 @@ public class PoliceCommandExecutor extends CommandExecutor<CommandPolice> {
 
         if (currentTarget == null) return this;
 
+        // 如果已经完成并发送了报告，直接返回 null，不再生成动作
+        if (reportSent) {
+            currentTarget = null;
+            return this;
+        }
+
         // 1. 标准完成检查
         if (isRoadClear(currentTarget)) {
             sendCompletionReport(myId);
-            broadcastRoadClear(currentTarget);
             currentTarget = null;
             return this;
         }
@@ -124,17 +127,14 @@ public class PoliceCommandExecutor extends CommandExecutor<CommandPolice> {
                     if (isRoadClear(currentTarget)) {
                         System.err.printf("[警察执行器] 警察 ID=%s 停滞 %d 步，道路已清理，完成%n", myId, stuckCount);
                         sendCompletionReport(myId);
-                        broadcastRoadClear(currentTarget);
                         currentTarget = null;
                         stuckCount = 0;
                         return this;
                     } else {
-                        // 检查道路是否未定义且无变化，若是则直接标记完成
                         Road r = (Road) worldInfo.getEntity(currentTarget);
                         if (r != null && !r.isBlockadesDefined()) {
                             System.err.printf("[警察执行器] 警察 ID=%s 在未定义道路 %s 停滞，强制完成%n", myId, currentTarget);
                             sendCompletionReport(myId);
-                            broadcastRoadClear(currentTarget);
                             currentTarget = null;
                             stuckCount = 0;
                             return this;
@@ -156,7 +156,6 @@ public class PoliceCommandExecutor extends CommandExecutor<CommandPolice> {
             this.result = action;
             if (action instanceof ActionClear && isRoadClear(currentTarget)) {
                 sendCompletionReport(myId);
-                broadcastRoadClear(currentTarget);
                 currentTarget = null;
             }
             return this;
@@ -167,7 +166,7 @@ public class PoliceCommandExecutor extends CommandExecutor<CommandPolice> {
         if (moveAction != null) {
             this.result = moveAction;
             retryCount = 0;
-            System.err.printf("[警察执行器] 警察 ID=%s 执行移动: 目标=%s%n", myId, currentTarget);
+            //System.err.printf("[警察执行器] 警察 ID=%s 执行移动: 目标=%s%n", myId, currentTarget);
             return this;
         }
 
@@ -176,7 +175,7 @@ public class PoliceCommandExecutor extends CommandExecutor<CommandPolice> {
         if (path != null && !path.isEmpty()) {
             this.result = new ActionMove(path);
             retryCount = 0;
-            System.err.printf("[警察执行器] 警察 ID=%s 使用备用路径移动: 目标=%s%n", myId, currentTarget);
+            //System.err.printf("[警察执行器] 警察 ID=%s 使用备用路径移动: 目标=%s%n", myId, currentTarget);
             return this;
         }
 
@@ -188,7 +187,7 @@ public class PoliceCommandExecutor extends CommandExecutor<CommandPolice> {
             if (!reportSent && commanderID != null) {
                 msgManager.addMessage(new MessageReport(true, true, true, commanderID));
                 reportSent = true;
-                broadcastRoadClear(currentTarget);
+                // 注意：放弃任务时也广播道路清理？这取决于策略。这里不广播，仅通知中心。
             }
             currentTarget = null;
             retryCount = 0;
@@ -201,15 +200,13 @@ public class PoliceCommandExecutor extends CommandExecutor<CommandPolice> {
         if (actionExtClear == null) return null;
         Action action = actionExtClear.setTarget(roadId).calc().getAction();
         if (action == null) {
-            // 若专业清理模块失败，尝试生成一个基本的清理动作
             StandardEntity e = worldInfo.getEntity(roadId);
             if (e instanceof Road) {
                 Road r = (Road) e;
-                // 获取道路中心坐标
                 int x = r.getX();
                 int y = r.getY();
-                System.err.printf("[警察执行器] 警察 ID=%s 使用默认清理动作: road=%s (%d,%d)%n",
-                        agentInfo.getID(), roadId, x, y);
+                //System.err.printf("[警察执行器] 警察 ID=%s 使用默认清理动作: road=%s (%d,%d)%n",
+                //        agentInfo.getID(), roadId, x, y);
                 return new ActionClear(x, y);
             }
         }
@@ -227,25 +224,29 @@ public class PoliceCommandExecutor extends CommandExecutor<CommandPolice> {
         if (!(e instanceof Road)) return true;
         Road r = (Road) e;
         List<EntityID> blockades = r.getBlockades();
-        // 若未定义且警察已到达，则由停滞逻辑处理
         return blockades != null && blockades.isEmpty();
     }
 
     private void sendCompletionReport(EntityID myId) {
-        if (!reportSent && commanderID != null) {
-            msgManager.addMessage(new MessageReport(true, true, true, commanderID));
-            reportSent = true;
-            //System.err.printf("[警察执行器] 警察 ID=%s 任务完成: road=%s%n", myId, currentTarget);
-        }
+        if (reportSent) return; // 已经发送过，避免重复
+        if (commanderID == null) return;
+
+        // 发送完成报告给指挥官
+        msgManager.addMessage(new MessageReport(true, true, true, commanderID));
+        reportSent = true;
+
+        // 广播道路已清理，以便其他智能体更新信息
+        broadcastRoadClear(currentTarget);
+
+        //System.err.printf("[警察执行器] 警察 ID=%s 任务完成: road=%s%n", myId, currentTarget);
     }
 
     private void broadcastRoadClear(EntityID roadId) {
-        if (msgManager == null) return;
+        if (msgManager == null || roadId == null) return;
         Road road = (Road) worldInfo.getEntity(roadId);
         if (road == null) return;
         MessageRoad msg = new MessageRoad(true, road, null, true, false);
         msgManager.addMessage(msg);
-        //System.err.printf("[警察执行器] 警察 ID=%s 广播道路已清理: road=%s%n", agentInfo.getID(), roadId);
     }
 
     @Override

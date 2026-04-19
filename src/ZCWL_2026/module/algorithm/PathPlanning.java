@@ -13,6 +13,7 @@ import rescuecore2.worldmodel.Entity;
 import rescuecore2.worldmodel.EntityID;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 public class PathPlanning extends adf.core.component.module.algorithm.PathPlanning {
 
@@ -21,6 +22,43 @@ public class PathPlanning extends adf.core.component.module.algorithm.PathPlanni
     private EntityID from;
     private Collection<EntityID> targets;
     private List<EntityID> result;
+
+    // ========== BFS 深度限制 ==========
+    private static final int MAX_SEARCH_DEPTH = 5000;
+
+    // ========== 缓存相关字段 ==========
+    private static class CacheKey {
+        final EntityID from;
+        final List<EntityID> sortedTargets;
+        final int timeStep;
+
+        CacheKey(EntityID from, Collection<EntityID> targets, int timeStep) {
+            this.from = from;
+            this.sortedTargets = targets == null ? Collections.emptyList() 
+                    : targets.stream()
+                             .sorted(Comparator.comparingInt(EntityID::getValue))
+                             .collect(Collectors.toList());
+            this.timeStep = timeStep;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            CacheKey cacheKey = (CacheKey) o;
+            return timeStep == cacheKey.timeStep &&
+                    Objects.equals(from, cacheKey.from) &&
+                    Objects.equals(sortedTargets, cacheKey.sortedTargets);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(from, sortedTargets, timeStep);
+        }
+    }
+
+    private CacheKey lastCacheKey = null;
+    private List<EntityID> cachedResult = null;
 
     public PathPlanning(AgentInfo ai, WorldInfo wi, ScenarioInfo si, ModuleManager moduleManager, DevelopData developData) {
         super(ai, wi, si, moduleManager, developData);
@@ -86,52 +124,87 @@ public class PathPlanning extends adf.core.component.module.algorithm.PathPlanni
 
     @Override
     public PathPlanning calc() {
-        List<EntityID> open = new LinkedList<>();
+        // 缓存检查
+        int currentTime = this.agentInfo.getTime();
+        CacheKey currentKey = new CacheKey(this.from, this.targets, currentTime);
+        if (currentKey.equals(lastCacheKey) && cachedResult != null) {
+            this.result = cachedResult;
+            return this;
+        }
+
+        // 使用队列进行 BFS，同时记录每个节点的深度
+        Queue<EntityID> open = new LinkedList<>();
         Map<EntityID, EntityID> ancestors = new HashMap<>();
+        Map<EntityID, Integer> depth = new HashMap<>();   // 记录深度
+        
         open.add(this.from);
-        EntityID next;
-        boolean found = false;
         ancestors.put(this.from, this.from);
-        do {
-            next = open.remove(0);
+        depth.put(this.from, 0);
+        
+        EntityID next = null;
+        boolean found = false;
+        int currentDepth = 0;
+        
+        while (!open.isEmpty() && !found) {
+            next = open.poll();
+            currentDepth = depth.get(next);
+            
+            // 深度限制检查
+            if (currentDepth > MAX_SEARCH_DEPTH) {
+                System.err.println("[PathPlanning] BFS 超过最大深度限制 " + MAX_SEARCH_DEPTH + "，终止搜索。from=" + this.from + " targets=" + this.targets);
+                this.result = null;
+                // 不缓存这次失败结果，因为可能由于深度限制导致未找到路径，下次可能状态变化
+                return this;
+            }
+            
             if (isGoal(next, targets)) {
                 found = true;
                 break;
             }
+            
             Collection<EntityID> neighbours = graph.get(next);
             if (neighbours.isEmpty()) {
                 continue;
             }
+            
             for (EntityID neighbour : neighbours) {
+                // 如果邻居是目标，立即完成
                 if (isGoal(neighbour, targets)) {
                     ancestors.put(neighbour, next);
+                    depth.put(neighbour, currentDepth + 1);
                     next = neighbour;
                     found = true;
                     break;
                 }
-                else {
-                    if (!ancestors.containsKey(neighbour)) {
-                        open.add(neighbour);
-                        ancestors.put(neighbour, next);
-                    }
+                
+                if (!ancestors.containsKey(neighbour)) {
+                    open.add(neighbour);
+                    ancestors.put(neighbour, next);
+                    depth.put(neighbour, currentDepth + 1);
                 }
             }
-        } while (!found && !open.isEmpty());
-        if (!found) {
-            // No path
-            this.result = null;
         }
-        // Walk back from goal to this.from
-        EntityID current = next;
-        LinkedList<EntityID> path = new LinkedList<>();
-        do {
-            path.add(0, current);
-            current = ancestors.get(current);
-            if (current == null) {
-                throw new RuntimeException("Found a node with no ancestor! Something is broken.");
-            }
-        } while (current != this.from);
-        this.result = path;
+        
+        if (!found) {
+            // 无路径
+            this.result = null;
+        } else {
+            // 回溯构建路径
+            EntityID current = next;
+            LinkedList<EntityID> path = new LinkedList<>();
+            do {
+                path.add(0, current);
+                current = ancestors.get(current);
+                if (current == null) {
+                    throw new RuntimeException("Found a node with no ancestor! Something is broken.");
+                }
+            } while (current != this.from);
+            this.result = path;
+        }
+
+        // 保存缓存
+        lastCacheKey = currentKey;
+        cachedResult = this.result == null ? null : new ArrayList<>(this.result);
         return this;
     }
 

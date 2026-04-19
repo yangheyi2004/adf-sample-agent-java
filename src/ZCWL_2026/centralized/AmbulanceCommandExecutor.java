@@ -127,12 +127,12 @@ public class AmbulanceCommandExecutor extends CommandExecutor {
                 else if (this.commandType == ACTION_AUTONOMY) actionName = "自主";
 
                 if (this.isForcedLoad) {
-                    System.err.println("╔══════════════════════════════════════════════════════════════╗");
+                    /*System.err.println("╔══════════════════════════════════════════════════════════════╗");
                     System.err.println("║  [救护车] ID:" + agentID + " 🚨 收到强制装载命令！");
                     System.err.println("║  目标: " + this.target);
-                    System.err.println("╚══════════════════════════════════════════════════════════════╝");
+                    System.err.println("╚══════════════════════════════════════════════════════════════╝");*/
                 } else {
-                    System.err.println("[救护车] ID:" + agentID + " 收到命令: " + actionName + " 目标=" + this.target);
+                    //System.err.println("[救护车] ID:" + agentID + " 收到命令: " + actionName + " 目标=" + this.target);
                 }
             }
         }
@@ -153,10 +153,10 @@ public class AmbulanceCommandExecutor extends CommandExecutor {
                 messageManager.addMessage(new MessageReport(true, true, false, this.commanderID));
                 reportSent = true;
 
-                System.err.println("╔══════════════════════════════════════════════════════════════╗");
+                /*System.err.println("╔══════════════════════════════════════════════════════════════╗");
                 System.err.println("║  [救护车] ID:" + this.agentInfo.getID() + " ✅ 完成任务！");
                 System.err.println("║  目标: " + this.target);
-                System.err.println("╚══════════════════════════════════════════════════════════════╝");
+                System.err.println("╚══════════════════════════════════════════════════════════════╝");*/
 
                 if (this.commandType == ACTION_LOAD) {
                     // 装载完成，标记平民为已处理
@@ -166,7 +166,7 @@ public class AmbulanceCommandExecutor extends CommandExecutor {
                     this.commandType = ACTION_UNLOAD;
                     this.target = null;
                     this.isForcedLoad = false;
-                    System.err.println("[救护车] ID:" + this.agentInfo.getID() + " 🔄 装载完成，转为卸载模式");
+                    //System.err.println("[救护车] ID:" + this.agentInfo.getID() + " 🔄 装载完成，转为卸载模式");
                 } else {
                     this.commandType = ACTION_UNKNOWN;
                     this.target = null;
@@ -218,7 +218,7 @@ public class AmbulanceCommandExecutor extends CommandExecutor {
         if (lastPosition != null && lastPosition.equals(currentPos)) {
             stuckCounter++;
             if (stuckCounter > MAX_STUCK_COUNT) {
-                System.err.println("[救护车] ID:" + agentID + " ⚠️ 卡在同一位置超过 " + MAX_STUCK_COUNT + " 步，重置状态");
+                //System.err.println("[救护车] ID:" + agentID + " ⚠️ 卡在同一位置超过 " + MAX_STUCK_COUNT + " 步，重置状态");
                 this.commandType = ACTION_UNKNOWN;
                 this.target = null;
                 this.stuckCounter = 0;
@@ -234,7 +234,7 @@ public class AmbulanceCommandExecutor extends CommandExecutor {
         if (lastTarget != null && lastTarget.equals(this.target)) {
             noProgressCounter++;
             if (noProgressCounter > MAX_NO_PROGRESS) {
-                System.err.println("[救护车] ID:" + agentID + " ⚠️ 对目标 " + this.target + " 无进展超过 " + MAX_NO_PROGRESS + " 步，放弃");
+                //System.err.println("[救护车] ID:" + agentID + " ⚠️ 对目标 " + this.target + " 无进展超过 " + MAX_NO_PROGRESS + " 步，放弃");
                 this.target = null;
                 this.noProgressCounter = 0;
             }
@@ -246,7 +246,7 @@ public class AmbulanceCommandExecutor extends CommandExecutor {
         // 优先处理车上伤员运输
         if (this.agentInfo.someoneOnBoard() != null) {
             Human passenger = this.agentInfo.someoneOnBoard();
-            System.err.println("[救护车] ID:" + agentID + " 🚑 车上有伤员 ID:" + passenger.getID() + "，优先执行运输任务");
+            //System.err.println("[救护车] ID:" + agentID + " 🚑 车上有伤员 ID:" + passenger.getID() + "，优先执行运输任务");
             this.actionTransport.setTarget((EntityID) null);
             Action transportAction = this.actionTransport.calc().getAction();
             if (transportAction != null) {
@@ -283,21 +283,21 @@ public class AmbulanceCommandExecutor extends CommandExecutor {
                         
                         // 检查是否已被处理
                         if (processedVictims.contains(this.target)) {
-                            System.err.println("[救护车] ID:" + agentID + " ⚠️ 平民 " + this.target + " 已被处理，放弃");
+                            //System.err.println("[救护车] ID:" + agentID + " ⚠️ 平民 " + this.target + " 已被处理，放弃");
                             this.target = null;
                             break;
                         }
                         
                         // 检查位置有效性
                         if (!victim.isPositionDefined()) {
-                            System.err.println("[救护车] ID:" + agentID + " ⚠️ 平民位置未定义，放弃");
+                            //System.err.println("[救护车] ID:" + agentID + " ⚠️ 平民位置未定义，放弃");
                             this.target = null;
                             break;
                         }
                         
                         EntityID victimPos = victim.getPosition();
                         if (victimPos == null) {
-                            System.err.println("[救护车] ID:" + agentID + " ⚠️ 平民位置为 null，放弃");
+                            //System.err.println("[救护车] ID:" + agentID + " ⚠️ 平民位置为 null，放弃");
                             this.target = null;
                             break;
                         }
@@ -305,8 +305,8 @@ public class AmbulanceCommandExecutor extends CommandExecutor {
                         // 检查距离
                         double distance = this.worldInfo.getDistance(currentPos, victimPos);
                         if (distance > MAX_LOAD_DISTANCE) {
-                            System.err.println("[救护车] ID:" + agentID + " 📏 距离平民 " + 
-                                               String.format("%.1f", distance) + "，需要 " + MAX_LOAD_DISTANCE + " 以内，继续移动");
+                            /*System.err.println("[救护车] ID:" + agentID + " 📏 距离平民 " + 
+                                               String.format("%.1f", distance) + "，需要 " + MAX_LOAD_DISTANCE + " 以内，继续移动");*/
                             List<EntityID> path = this.pathPlanning.getResult(currentPos, victimPos);
                             if (path != null && !path.isEmpty()) {
                                 this.result = new ActionMove(path);
@@ -330,7 +330,7 @@ public class AmbulanceCommandExecutor extends CommandExecutor {
                     StandardEntity targetEntity = this.worldInfo.getEntity(this.target);
                     
                     if (targetEntity == null) {
-                        System.err.println("[救护车] ID:" + agentID + " ⚠️ 目标实体不存在，放弃任务");
+                        //System.err.println("[救护车] ID:" + agentID + " ⚠️ 目标实体不存在，放弃任务");
                         this.target = null;
                         break;
                     }
@@ -340,20 +340,20 @@ public class AmbulanceCommandExecutor extends CommandExecutor {
                         
                         // 检查是否已被处理
                         if (processedVictims.contains(this.target)) {
-                            System.err.println("[救护车] ID:" + agentID + " ⚠️ 平民已被处理，放弃");
+                            //System.err.println("[救护车] ID:" + agentID + " ⚠️ 平民已被处理，放弃");
                             this.target = null;
                             break;
                         }
                         
                         if (!human.isPositionDefined()) {
-                            System.err.println("[救护车] ID:" + agentID + " ⚠️ 平民位置未定义，放弃任务");
+                            //System.err.println("[救护车] ID:" + agentID + " ⚠️ 平民位置未定义，放弃任务");
                             this.target = null;
                             break;
                         }
                         
                         EntityID victimPos = human.getPosition();
                         if (victimPos == null) {
-                            System.err.println("[救护车] ID:" + agentID + " ⚠️ 平民位置为 null，放弃任务");
+                            //System.err.println("[救护车] ID:" + agentID + " ⚠️ 平民位置为 null，放弃任务");
                             this.target = null;
                             break;
                         }
@@ -363,25 +363,25 @@ public class AmbulanceCommandExecutor extends CommandExecutor {
                         boolean isDead = human.isHPDefined() && human.getHP() == 0;
 
                         if (isDead) {
-                            System.err.println("[救护车] ID:" + agentID + " ❌ 目标平民已死亡，放弃任务");
+                            //System.err.println("[救护车] ID:" + agentID + " ❌ 目标平民已死亡，放弃任务");
                             this.target = null;
                             break;
                         }
 
                         if (isBuried) {
-                            System.err.println("[救护车] ID:" + agentID + " ⏳ 目标平民仍被掩埋，等待消防员");
+                            //System.err.println("[救护车] ID:" + agentID + " ⏳ 目标平民仍被掩埋，等待消防员");
                             break;
                         }
 
                         if (!hasDamage) {
-                            System.err.println("[救护车] ID:" + agentID + " ⚠️ 目标平民未受伤，无需装载");
+                            //System.err.println("[救护车] ID:" + agentID + " ⚠️ 目标平民未受伤，无需装载");
                             this.target = null;
                             break;
                         }
 
                         StandardEntity posEntity = this.worldInfo.getEntity(victimPos);
                         if (posEntity != null && posEntity.getStandardURN() == REFUGE) {
-                            System.err.println("[救护车] ID:" + agentID + " 🏥 目标平民已在避难所，任务完成");
+                            //System.err.println("[救护车] ID:" + agentID + " 🏥 目标平民已在避难所，任务完成");
                             this.target = null;
                             break;
                         }
@@ -389,8 +389,8 @@ public class AmbulanceCommandExecutor extends CommandExecutor {
                         // 检查距离
                         double distance = this.worldInfo.getDistance(currentPos, victimPos);
                         if (distance > MAX_LOAD_DISTANCE) {
-                            System.err.println("[救护车] ID:" + agentID + " 📏 距离平民 " + 
-                                               String.format("%.1f", distance) + "，需要靠近");
+                            /*System.err.println("[救护车] ID:" + agentID + " 📏 距离平民 " + 
+                                               String.format("%.1f", distance) + "，需要靠近");*/
                             List<EntityID> path = this.pathPlanning.getResult(currentPos, victimPos);
                             if (path != null && !path.isEmpty()) {
                                 this.result = new ActionMove(path);
@@ -405,7 +405,7 @@ public class AmbulanceCommandExecutor extends CommandExecutor {
                         this.actionExtMove.setTarget(this.target);
                         this.result = this.actionExtMove.calc().getAction();
                     } else {
-                        System.err.println("[救护车] ID:" + agentID + " ⚠️ 目标类型未知，放弃");
+                        //System.err.println("[救护车] ID:" + agentID + " ⚠️ 目标类型未知，放弃");
                         this.target = null;
                     }
                 }

@@ -45,7 +45,7 @@ public class AmbulanceCommandPicker extends adf.core.component.centralized.Comma
         this.lastAllocationHash = 0;
         this.scoutDistance = developData.getInteger("AmbulanceCommandPicker.scoutDistance", 40000);
         
-        System.err.println("[救护车命令选择器] 已加载");
+        //System.err.println("[救护车命令选择器] 已加载");
     }
 
     @Override
@@ -60,7 +60,7 @@ public class AmbulanceCommandPicker extends adf.core.component.centralized.Comma
         
         if (this.allocationData == null || this.allocationData.isEmpty()) {
             if (lastAllocationHash != 0) {
-                System.err.println("[救护车命令选择器] 无分配结果");
+                //System.err.println("[救护车命令选择器] 无分配结果");
                 lastAllocationHash = 0;
                 lastAllocation.clear();
             }
@@ -75,7 +75,7 @@ public class AmbulanceCommandPicker extends adf.core.component.centralized.Comma
         }
         lastAllocationHash = currentHash;
         
-        System.err.println("[救护车命令选择器] 收到分配结果，任务数: " + this.allocationData.size());
+        //System.err.println("[救护车命令选择器] 收到分配结果，任务数: " + this.allocationData.size());
         
         int commandCount = 0;
         int humanCount = 0;
@@ -88,14 +88,14 @@ public class AmbulanceCommandPicker extends adf.core.component.centralized.Comma
             
             StandardEntity agent = this.worldInfo.getEntity(agentID);
             if (agent == null || agent.getStandardURN() != StandardEntityURN.AMBULANCE_TEAM) {
-                System.err.println("[救护车命令选择器] ⚠️ 警察 " + agentID + " 无效");
+                //System.err.println("[救护车命令选择器] ⚠️ 警察 " + agentID + " 无效");
                 skipCount++;
                 continue;
             }
             
             StandardEntity target = this.worldInfo.getEntity(targetID);
             if (target == null) {
-                System.err.println("[救护车命令选择器] ⚠️ 目标 " + targetID + " 不存在");
+                //System.err.println("[救护车命令选择器] ⚠️ 目标 " + targetID + " 不存在");
                 skipCount++;
                 continue;
             }
@@ -121,12 +121,12 @@ public class AmbulanceCommandPicker extends adf.core.component.centralized.Comma
                 humanCount++;
                 
                 Human human = (Human) target;
-                System.err.println("╔══════════════════════════════════════════════════════════════╗");
+                /*System.err.println("╔══════════════════════════════════════════════════════════════╗");
                 System.err.println("║  [救护车命令选择器] 🚑 生成装载命令                         ║");
                 System.err.println("║  救护车: " + agentID);
                 System.err.println("║  平民: " + targetID + " 伤害=" + human.getDamage());
                 System.err.println("║  位置: " + human.getPosition());
-                System.err.println("╚══════════════════════════════════════════════════════════════╝");
+                System.err.println("╚══════════════════════════════════════════════════════════════╝");*/
                 
             } else if (target instanceof Area) {
                 CommandScout command = new CommandScout(
@@ -140,11 +140,11 @@ public class AmbulanceCommandPicker extends adf.core.component.centralized.Comma
                 commandCount++;
                 areaCount++;
                 
-                System.err.println("[救护车命令选择器] 🔍 生成侦察命令: 救护车=" + agentID + 
-                                   " 目标区域=" + targetID);
+                //System.err.println("[救护车命令选择器] 🔍 生成侦察命令: 救护车=" + agentID + 
+                                  // " 目标区域=" + targetID);
             } else {
-                System.err.println("[救护车命令选择器] ⚠️ 目标类型未知: " + 
-                                   target.getClass().getSimpleName() + " ID=" + targetID);
+               // System.err.println("[救护车命令选择器] ⚠️ 目标类型未知: " + 
+                                   //target.getClass().getSimpleName() + " ID=" + targetID);
                 skipCount++;
             }
         }
@@ -155,10 +155,10 @@ public class AmbulanceCommandPicker extends adf.core.component.centralized.Comma
             lastAllocation.keySet().retainAll(this.allocationData.keySet());
         }
         
-        System.err.println("[救护车命令选择器] 生成命令完成: " +
+        /*System.err.println("[救护车命令选择器] 生成命令完成: " +
                            "装载=" + humanCount + ", " +
                            "侦察=" + areaCount + ", " +
-                           "跳过=" + skipCount);
+                           "跳过=" + skipCount);*/
         
         return this;
     }
@@ -181,7 +181,7 @@ public class AmbulanceCommandPicker extends adf.core.component.centralized.Comma
     public void reset() {
         lastAllocation.clear();
         lastAllocationHash = 0;
-        System.err.println("[救护车命令选择器] 状态已重置");
+        //System.err.println("[救护车命令选择器] 状态已重置");
     }
 
     @Override

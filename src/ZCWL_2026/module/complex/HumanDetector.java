@@ -30,6 +30,10 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
     private static final int LOG_INTERVAL = 10;
     private Set<EntityID> loggedCivilianMessages = new HashSet<>();
 
+    // ========== 新增：救护车全量扫描计时 ==========
+    private int lastFullScanTime = 0;
+    private static final int FULL_SCAN_INTERVAL = 3; // 每7步全量扫描一次
+
     public HumanDetector(AgentInfo ai, WorldInfo wi, ScenarioInfo si,
                          ModuleManager mm, DevelopData dd) {
         super(ai, wi, si, mm, dd);
@@ -66,8 +70,8 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                         && c.isBuriednessDefined() && c.getBuriedness() > 0
                         && c.isPositionDefined()) {
                         if (knownBuriedVictims.add(c.getID())) {
-                            System.err.println("[HumanDetector] 世界变化扫描发现被掩埋平民: " + c.getID() +
-                                               " 于建筑 " + c.getPosition());
+                            /*System.err.println("[HumanDetector] 世界变化扫描发现被掩埋平民: " + c.getID() +
+                                               " 于建筑 " + c.getPosition());*/
                         }
                     }
                 }
@@ -86,7 +90,25 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                         && c.isDamageDefined() && c.getDamage() > 0
                         && c.isPositionDefined()) {
                         if (knownUnburiedVictims.add(c.getID())) {
-                            System.err.println("[HumanDetector] 救护车扫描到已挖出伤员: " + c.getID() +
+                           /*  System.err.println("[HumanDetector] 救护车扫描到已挖出伤员: " + c.getID() +
+                                               " 伤害=" + c.getDamage() + " 位置=" + c.getPosition());*/
+                        }
+                    }
+                }
+            }
+
+            // ========== 新增：定期全量扫描所有平民，防止遗漏 ==========
+            int currentTime = this.agentInfo.getTime();
+            if (currentTime - lastFullScanTime >= FULL_SCAN_INTERVAL) {
+                lastFullScanTime = currentTime;
+                for (StandardEntity e : this.worldInfo.getEntitiesOfType(CIVILIAN)) {
+                    Civilian c = (Civilian) e;
+                    if (c.isHPDefined() && c.getHP() > 0 
+                        && c.isBuriednessDefined() && c.getBuriedness() == 0
+                        && c.isDamageDefined() && c.getDamage() > 0
+                        && c.isPositionDefined()) {
+                        if (knownUnburiedVictims.add(c.getID())) {
+                            System.err.println("[HumanDetector] 救护车全量扫描发现已挖出伤员: " + c.getID() +
                                                " 伤害=" + c.getDamage() + " 位置=" + c.getPosition());
                         }
                     }
@@ -102,13 +124,38 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                 EntityID victimId = mc.getAgentID();
                 String source = mc.isRadio() ? "语音" : "无线";
                 
+                // ========== 新增：语音消息中已挖出且受伤的平民，加入待装载列表 ==========
+                if (mc.isRadio() && mc.isBuriednessDefined() && mc.getBuriedness() == 0
+                        && mc.isDamageDefined() && mc.getDamage() > 0) {
+                    if (this.agentType == AMBULANCE_TEAM) {
+                        // 检查平民是否仍然有效（未被装载、未死亡、未治愈）
+                        StandardEntity e = worldInfo.getEntity(victimId);
+                        if (e instanceof Civilian) {
+                            Civilian c = (Civilian) e;
+                            if (c.isPositionDefined() && c.getPosition() != null) {
+                                if (knownUnburiedVictims.add(victimId)) {
+                                    ///System.err.println("[HumanDetector] 🚑 收到语音挖出通知，添加已挖出伤员: " + victimId);
+                                }
+                            } else {
+                                // 位置无效，说明已被装载，从待装载列表中移除
+                                if (knownUnburiedVictims.remove(victimId)) {
+                                    System.err.println("[HumanDetector] 🚑 收到语音装载通知，立即移除平民: " + victimId);
+                                }
+                            }
+                        }
+                    }
+                    // 同时从消防车的掩埋列表中移除（如果存在）
+                    knownBuriedVictims.remove(victimId);
+                    // 不 continue，让后续 processCivilianMessage 也处理一遍（Set 会去重）
+                }
+                
                 if (this.agentType == FIRE_BRIGADE && !loggedCivilianMessages.contains(victimId)) {
                     /*System.err.println("[HumanDetector] 收到 MessageCivilian [" + source + "]: agent=" + victimId + 
                                        ", buriedness=" + (mc.isBuriednessDefined() ? mc.getBuriedness() : "undefined") +
                                        ", damage=" + (mc.isDamageDefined() ? mc.getDamage() : "undefined") +
                                        ", position=" + mc.getPosition() +
-                                       ", HP=" + (mc.isHPDefined() ? mc.getHP() : "undefined"));
-                    loggedCivilianMessages.add(victimId);*/
+                                       ", HP=" + (mc.isHPDefined() ? mc.getHP() : "undefined"));*/
+                    loggedCivilianMessages.add(victimId);
                 }
                 processCivilianMessage(mc);
                 
@@ -131,9 +178,9 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
         
         cleanupVictims();
         
-        int currentTime = this.agentInfo.getTime();
-        if (currentTime - lastLogTime >= LOG_INTERVAL) {
-            lastLogTime = currentTime;
+        int currentTimeLog = this.agentInfo.getTime();
+        if (currentTimeLog - lastLogTime >= LOG_INTERVAL) {
+            lastLogTime = currentTimeLog;
             logPendingVictims();
         }
         
@@ -149,7 +196,6 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
         boolean hasDamage = mc.isDamageDefined() && mc.getDamage() > 0;
         
         if (this.agentType == AMBULANCE_TEAM) {
-            // 救护车只关心已挖出且受伤的平民
             if (!isBuried && hasDamage) {
                 StandardEntity e = worldInfo.getEntity(victimId);
                 if (e instanceof Civilian) {
@@ -157,7 +203,6 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                 }
             }
         } else if (this.agentType == FIRE_BRIGADE) {
-            // 消防车关心所有被掩埋的单位
             if (isBuried) {
                 knownBuriedVictims.add(victimId);
                 if (mc.isPositionDefined()) {
@@ -198,16 +243,15 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
     private void logPendingVictims() {
         String agentName = (this.agentType == FIRE_BRIGADE) ? "消防车" : "救护车";
         if (this.agentType == FIRE_BRIGADE) {
-            /*System.err.println("[" + agentName + " ID:" + this.agentInfo.getID() + 
-                               "] 📊 待救援: 被掩埋=" + knownBuriedVictims.size());*/
+            //System.err.println("[" + agentName + " ID:" + this.agentInfo.getID() + 
+                               //"] 📊 待救援: 被掩埋=" + knownBuriedVictims.size());
         } else {
-            /*System.err.println("[" + agentName + " ID:" + this.agentInfo.getID() + 
-                               "] 📊 待装载: 已挖出=" + knownUnburiedVictims.size());*/
+            //System.err.println("[" + agentName + " ID:" + this.agentInfo.getID() + 
+                               //"] 📊 待装载: 已挖出=" + knownUnburiedVictims.size());
         }
     }
     
     private void cleanupVictims() {
-        // 清理已挖出伤员列表
         List<EntityID> toRemove = new ArrayList<>();
         for (EntityID vid : knownUnburiedVictims) {
             Human victim = (Human) worldInfo.getEntity(vid);
@@ -239,7 +283,6 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
         }
         knownUnburiedVictims.removeAll(toRemove);
         
-        // 清理掩埋目标列表
         toRemove.clear();
         for (EntityID vid : knownBuriedVictims) {
             Human victim = (Human) worldInfo.getEntity(vid);
@@ -259,17 +302,17 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
     }
 
     @Override
-    public HumanDetector calc() {
+public HumanDetector calc() {
+    try {
         this.result = null;
         
         if (this.agentType == AMBULANCE_TEAM) {
-            // ========== 救护车：只处理已挖出伤员 ==========
             if (!knownUnburiedVictims.isEmpty()) {
                 Set<EntityID> validTargets = new HashSet<>();
                 for (EntityID vid : knownUnburiedVictims) {
                     Human h = (Human) worldInfo.getEntity(vid);
                     if (h == null) continue;
-                    if (!(h instanceof Civilian)) continue; // 只装载平民
+                    if (!(h instanceof Civilian)) continue;
                     if (h.isHPDefined() && h.getHP() == 0) continue;
                     if (!h.isPositionDefined()) continue;
                     EntityID pos = h.getPosition();
@@ -289,7 +332,6 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                 }
             }
             
-            // 身边直接发现的伤员
             EntityID currentPos = this.agentInfo.getPosition();
             Collection<StandardEntity> entitiesInRange = this.worldInfo.getObjectsInRange(currentPos, 100);
             for (StandardEntity e : entitiesInRange) {
@@ -300,7 +342,6 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                     boolean isBuried = c.isBuriednessDefined() && c.getBuriedness() > 0;
                     boolean hasDamage = c.isDamageDefined() && c.getDamage() > 0;
                     if (isBuried) {
-                        // 向消防车上报
                         if (!reportedVictims.contains(humanId)) {
                             sendReportMessage(c);
                             reportedVictims.add(humanId);
@@ -315,7 +356,7 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                             }
                         }
                         this.result = humanId;
-                        System.err.println("[救护车] 发现身边伤员: " + humanId);
+                        //System.err.println("[救护车] 发现身边伤员: " + humanId);
                         return this;
                     }
                 }
@@ -323,7 +364,6 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
             return this;
         }
         
-        // ========== 消防车逻辑（无锁定，每步重新选择最近目标） ==========
         if (this.agentType == FIRE_BRIGADE) {
             if (!knownBuriedVictims.isEmpty()) {
                 Set<EntityID> civilians = new HashSet<>();
@@ -336,13 +376,8 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                 EntityID best;
                 if (!civilians.isEmpty()) {
                     best = findNearestVictim(civilians);
-                    /*System.err.println("[消防车] 选择最近的被掩埋平民: " + best);*/
                 } else {
                     best = findNearestVictim(knownBuriedVictims);
-                    Human victim = (Human) worldInfo.getEntity(best);
-                    String type = (victim instanceof FireBrigade) ? "消防车" :
-                                  (victim instanceof PoliceForce) ? "警车" : "救护车";
-                    /*System.err.println("[消防车] 无平民，选择最近的 " + type + ": " + best);*/
                 }
                 if (best != null) {
                     this.result = best;
@@ -355,7 +390,6 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                 }
             }
             
-            // 没有已知掩埋目标，使用聚类或全局搜索
             if (clustering == null) {
                 this.result = this.calcTargetInWorld();
             } else {
@@ -372,8 +406,13 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                 }
             }
         }
-        return this;
+    } catch (Exception e) {
+        System.err.println("[HumanDetector] calc() 异常: " + e.getMessage());
+        e.printStackTrace();
+        this.result = null;
     }
+    return this;
+}
     
     private double getDistanceToVictim(EntityID victimId) {
         Human h = (Human) worldInfo.getEntity(victimId);

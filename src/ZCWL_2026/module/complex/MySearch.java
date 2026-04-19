@@ -123,8 +123,8 @@ public class MySearch extends Search {
                             }
                         }
                         this.zoneTotalCount = this.zoneBuildings.size();
-                        System.err.println("[MySearch] 聚类返回实体数: " + this.myClusterBuildings.size() +
-                                           ", 本区域建筑数: " + this.zoneTotalCount);
+                        /*System.err.println("[MySearch] 聚类返回实体数: " + this.myClusterBuildings.size() +
+                                           ", 本区域建筑数: " + this.zoneTotalCount);*/
                         return;
                     }
                 }
@@ -146,7 +146,7 @@ public class MySearch extends Search {
         if (beforeCount != afterCount && zoneTotalCount > 0) {
             int remaining = zoneUnsearched.size();
             int explored = zoneTotalCount - remaining;
-            System.err.println("[MySearch] 区域探索进度: " + explored + "/" + zoneTotalCount);
+            //System.err.println("[MySearch] 区域探索进度: " + explored + "/" + zoneTotalCount);
         }
         if (zoneUnsearched.isEmpty() && zoneTotalCount > 0 && !zoneCompleted) {
             zoneCompleted = true;
@@ -186,8 +186,8 @@ public class MySearch extends Search {
         initFullMapBuildings();
         updateCurrentTargets();
         initialized = true;
-        System.err.println("[MySearch] 初始化完成，当前模式: " + 
-                           (zoneTotalCount > 0 ? "区域优先（" + zoneTotalCount + "个建筑）" : "全局探索"));
+        /*System.err.println("[MySearch] 初始化完成，当前模式: " + 
+                           (zoneTotalCount > 0 ? "区域优先（" + zoneTotalCount + "个建筑）" : "全局探索"));*/
     }
 
     @Override
@@ -216,8 +216,8 @@ public class MySearch extends Search {
                             MessageCivilian msgCivilian = new MessageCivilian(true, c);
                             messageManager.addMessage(msgCivilian);
                             reportedVictimBuildingsByPolice.add(buildingId);
-                            System.err.println("[MySearch] 警察 " + this.agentInfo.getID() + 
-                                               " 视野发现被困平民 " + c.getID() + " 于建筑 " + buildingId + "，语音已上报");
+                            /*System.err.println("[MySearch] 警察 " + this.agentInfo.getID() + 
+                                               " 视野发现被困平民 " + c.getID() + " 于建筑 " + buildingId + "，语音已上报");*/
                         }
                     }
                 }
@@ -239,8 +239,8 @@ public class MySearch extends Search {
                                     MessageCivilian msgCivilian = new MessageCivilian(true, c);
                                     messageManager.addMessage(msgCivilian);
                                     found = true;
-                                    System.err.println("[MySearch] 警察 " + this.agentInfo.getID() + 
-                                                       " 进入建筑 " + building.getID() + " 发现被困平民 " + c.getID() + "，语音已上报");
+                                    /*System.err.println("[MySearch] 警察 " + this.agentInfo.getID() + 
+                                                       " 进入建筑 " + building.getID() + " 发现被困平民 " + c.getID() + "，语音已上报");*/
                                 }
                             }
                         }

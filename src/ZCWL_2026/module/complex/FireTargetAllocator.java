@@ -20,7 +20,6 @@ import static rescuecore2.standard.entities.StandardEntityURN.*;
 
 public class FireTargetAllocator extends adf.core.component.module.complex.FireTargetAllocator {
 
-    // 优先级常量
     private static final int PRIORITY_TYPE_FIRE = 0;
     private static final int PRIORITY_TYPE_POLICE = 1;
     private static final int PRIORITY_TYPE_AMBULANCE = 2;
@@ -39,16 +38,20 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
     
     private Map<EntityID, Integer> rescueAssignCount;
     private Set<EntityID> completedRescues;
-    private Set<EntityID> processedRescueMessages; // 已处理过的救援请求（防止重复添加）
+    private Set<EntityID> processedRescueMessages;
     
-    private Set<EntityID> rescueRequestTargets;  // 人员ID
-    private Set<EntityID> fireTargets;           // 建筑ID
-    
+    private Set<EntityID> rescueRequestTargets;
+    private Set<EntityID> fireTargets;
     private Map<EntityID, Integer> rescuePriorityMap;
 
-    // 日志去重
+    private Set<EntityID> targetsLockedByOthers;
+    private Map<EntityID, Integer> targetRescueCount;
+
     private Set<String> loggedMessageIds;
     private int lastLogCleanTime;
+
+    // ========== 关键修复：记录本轮新分配的任务，确保 getResult 不返回空 ==========
+    private Map<EntityID, EntityID> newAssignments;
 
     public FireTargetAllocator(AgentInfo ai, WorldInfo wi, ScenarioInfo si,
                                 ModuleManager moduleManager, DevelopData developData) {
@@ -67,8 +70,12 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
         this.fireTargets = new HashSet<>();
         this.rescuePriorityMap = new HashMap<>();
         
+        this.targetsLockedByOthers = new HashSet<>();
+        this.targetRescueCount = new HashMap<>();
+        
         this.loggedMessageIds = new HashSet<>();
         this.lastLogCleanTime = 0;
+        this.newAssignments = new HashMap<>();
 
         switch (si.getMode()) {
             case PRECOMPUTATION_PHASE:
@@ -83,7 +90,7 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
             registerModule(this.pathPlanning);
         }
         
-        System.err.println("[消防员分配器] 已加载 - 直接使用消息数据，绕过世界模型");
+        //System.err.println("[消防员分配器] 已加载 ");
     }
 
     @Override
@@ -104,6 +111,29 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
 
     @Override
     public Map<EntityID, EntityID> getResult() {
+        // 优先返回本轮新分配的任务，避免因 isBusy 状态导致的空结果
+        if (!newAssignments.isEmpty()) {
+            // ========== 新增：返回前过滤已完成任务 ==========
+            Map<EntityID, EntityID> validAssignments = new HashMap<>();
+            for (Map.Entry<EntityID, EntityID> entry : newAssignments.entrySet()) {
+                EntityID target = entry.getValue();
+                if (!isVictimCompleted(target)) {
+                    validAssignments.put(entry.getKey(), entry.getValue());
+                } else {
+                    // 任务已完成，释放消防车
+                    releaseTask(target, entry.getKey());
+                    FireInfo info = firemanMap.get(entry.getKey());
+                    if (info != null) {
+                        info.currentTask = null;
+                        info.isBusy = false;
+                    }
+                }
+            }
+            newAssignments = validAssignments;
+            //System.err.println("[消防员分配器] getResult() 返回本轮新分配任务数: " + newAssignments.size());
+            return new HashMap<>(newAssignments);
+        }
+        // 兼容旧逻辑（通常不会执行到这里）
         Map<EntityID, EntityID> result = new HashMap<>();
         for (Map.Entry<EntityID, EntityID> entry : assignedFiremanTasks.entrySet()) {
             FireInfo info = firemanMap.get(entry.getKey());
@@ -111,9 +141,10 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
                 result.put(entry.getKey(), entry.getValue());
             }
         }
+        //System.err.println("[消防员分配器] getResult() 返回任务数: " + result.size());
         return result;
     }
-    
+
     @Override
     public FireTargetAllocator calc() {
         updateTaskQueue();
@@ -131,13 +162,18 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
             loggedMessageIds.clear();
         }
         
-        // 主动扫描世界（作为保底和任务完成检查）
+        // 清理已失效的锁定目标（修复 ClassCastException：先判断类型）
+        targetsLockedByOthers.removeIf(vid -> {
+            StandardEntity e = worldInfo.getEntity(vid);
+            if (!(e instanceof Human)) return true; // 非人员实体直接移除
+            Human h = (Human) e;
+            return (h.isHPDefined() && h.getHP() == 0) ||
+                   (h.isBuriednessDefined() && h.getBuriedness() == 0);
+        });
+        targetRescueCount.keySet().removeIf(vid -> !targetsLockedByOthers.contains(vid));
+        
         scanWorldForBuriedVictims();
-        
-        // 处理消息（直接基于消息内容添加任务）
         processMessages(messageManager);
-        
-        // 清理已完成任务
         removeCompletedTasks();
         checkTaskCompletion();
         
@@ -148,10 +184,9 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
         for (EntityID id : this.worldInfo.getEntityIDsOfType(FIRE_BRIGADE)) {
             firemanMap.put(id, new FireInfo(id));
         }
-        System.err.println("[消防员分配器] 初始化完成，消防员数量: " + firemanMap.size());
+        //System.err.println("[消防员分配器] 初始化完成，消防员数量: " + firemanMap.size());
     }
 
-    // ========== 主动扫描世界（用于任务完成检查和补充遗漏） ==========
     private void scanWorldForBuriedVictims() {
         int found = 0;
         for (StandardEntity e : this.worldInfo.getEntitiesOfType(
@@ -159,16 +194,8 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
             Human h = (Human) e;
             EntityID victimId = h.getID();
             
-            // 如果任务已完成，跳过
-            if (isVictimCompleted(victimId)) {
-                // 如果曾经处理过，则标记完成
-                if (processedRescueMessages.contains(victimId)) {
-                    completedRescues.add(victimId);
-                }
-                continue;
-            }
+            if (isVictimCompleted(victimId)) continue;
             
-            // 如果被掩埋且尚未处理，作为补充任务加入
             if (h.isBuriednessDefined() && h.getBuriedness() > 0) {
                 if (!processedRescueMessages.contains(victimId)) {
                     processedRescueMessages.add(victimId);
@@ -180,7 +207,6 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
             }
         }
         
-        // 扫描着火建筑
         for (StandardEntity e : this.worldInfo.getEntitiesOfType(BUILDING, GAS_STATION)) {
             Building b = (Building) e;
             if (b.isOnFire()) {
@@ -189,11 +215,10 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
         }
         
         if (found > 0) {
-            System.err.println("[消防员分配器] 🔍 主动扫描补充发现 " + found + " 个被掩埋单位");
+            //System.err.println("[消防员分配器] 🔍 主动扫描发现 " + found + " 个被掩埋单位");
         }
     }
 
-    // 基于世界模型判断任务是否已完成（用于清理）
     private boolean isVictimCompleted(EntityID victimId) {
         Human h = (Human) this.worldInfo.getEntity(victimId);
         if (h == null) return true;
@@ -212,31 +237,33 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
         }
     }
 
-    // ========== 消息处理（关键修复：直接使用消息数据，不依赖世界模型） ==========
     private void processMessages(MessageManager messageManager) {
         List<CommunicationMessage> messages = messageManager.getReceivedMessageList();
         
-        int civilianCount = 0, policeCount = 0, fireCount = 0, ambulanceCount = 0;
-        
         for (CommunicationMessage message : messages) {
             if (message instanceof MessageCivilian) {
-                civilianCount++;
                 MessageCivilian mc = (MessageCivilian) message;
-                MessageUtil.reflectMessage(this.worldInfo, mc); // 同步世界模型（不影响判断）
+                MessageUtil.reflectMessage(this.worldInfo, mc);
                 handleRescueRequest(mc);
             } else if (message instanceof MessagePoliceForce) {
-                policeCount++;
                 MessagePoliceForce mpf = (MessagePoliceForce) message;
                 MessageUtil.reflectMessage(this.worldInfo, mpf);
                 handleRescueRequest(mpf);
             } else if (message instanceof MessageFireBrigade) {
-                fireCount++;
                 MessageFireBrigade mfb = (MessageFireBrigade) message;
                 MessageUtil.reflectMessage(this.worldInfo, mfb);
                 handleRescueRequest(mfb);
                 handleFiremanMessage(mfb);
+                
+                if (mfb.isRadio() && mfb.getAction() == MessageFireBrigade.ACTION_RESCUE 
+                    && mfb.getTargetID() != null) {
+                    EntityID target = mfb.getTargetID();
+                    if (!mfb.getAgentID().equals(this.agentInfo.getID())) {
+                        targetsLockedByOthers.add(target);
+                        targetRescueCount.put(target, targetRescueCount.getOrDefault(target, 0) + 1);
+                    }
+                }
             } else if (message instanceof MessageAmbulanceTeam) {
-                ambulanceCount++;
                 MessageAmbulanceTeam mat = (MessageAmbulanceTeam) message;
                 MessageUtil.reflectMessage(this.worldInfo, mat);
                 handleRescueRequest(mat);
@@ -248,44 +275,49 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
                 handleReportMessage((MessageReport) message);
             }
         }
-        
-        if (civilianCount > 0 || policeCount > 0 || fireCount > 0 || ambulanceCount > 0) {
-            /*System.err.println("[消防员分配器] 📨 本轮消息: 平民=" + civilianCount + 
-                               " 警察=" + policeCount + " 消防=" + fireCount + " 救护=" + ambulanceCount);*/
-        }
     }
 
     private void handleRescueRequest(MessageCivilian msg) {
         EntityID victimId = msg.getAgentID();
         
-        // 日志去重
-        int timeWindow = this.agentInfo.getTime() / 10;
-        String msgKey = "C_" + victimId + "_" + timeWindow;
-        if (!loggedMessageIds.contains(msgKey)) {
-            loggedMessageIds.add(msgKey);
-            System.err.println("[消防员分配器] 📨 收到平民消息: " + victimId + 
-                               " 语音=" + msg.isRadio() +
-                               " 埋压=" + (msg.isBuriednessDefined() ? msg.getBuriedness() : "?") +
-                               " 位置=" + (msg.isPositionDefined() ? msg.getPosition() : "?"));
+        // ========== 新增：如果平民已挖出，立即清理任务 ==========
+        if (msg.isBuriednessDefined() && msg.getBuriedness() == 0) {
+            // 平民已挖出，从所有任务集合中移除
+            if (rescueRequestTargets.remove(victimId)) {
+                completedRescues.add(victimId);
+                rescuePriorityMap.remove(victimId);
+                processedRescueMessages.remove(victimId);
+                // 释放所有分配到该目标的消防车
+                for (Map.Entry<EntityID, EntityID> entry : new HashMap<>(assignedFiremanTasks).entrySet()) {
+                    if (entry.getValue().equals(victimId)) {
+                        releaseTask(victimId, entry.getKey());
+                        FireInfo info = firemanMap.get(entry.getKey());
+                        if (info != null) {
+                            info.currentTask = null;
+                            info.isBusy = false;
+                        }
+                    }
+                }
+                //System.err.println("[消防员分配器] 收到挖出消息，清理已完成任务: " + victimId);
+            }
+            return;
         }
+        // ==================================================
         
-        // 直接基于消息内容判断有效性，不依赖世界模型
         if (msg.isHPDefined() && msg.getHP() == 0) return;
         if (!msg.isBuriednessDefined() || msg.getBuriedness() == 0) return;
-        if (!msg.isPositionDefined()) return; // 无位置信息则无法救援
+        if (!msg.isPositionDefined()) return;
         
-        // 如果未处理过，直接加入任务
         if (!processedRescueMessages.contains(victimId)) {
             processedRescueMessages.add(victimId);
             rescueRequestTargets.add(victimId);
             rescuePriorityMap.put(victimId, PRIORITY_TYPE_CIVILIAN);
-            System.err.println("[消防员分配器] ✅ 添加平民救援任务: " + victimId);
+            //System.err.println("[消防员分配器] ✅ 添加平民救援任务: " + victimId);
         }
     }
 
     private void handleRescueRequest(MessagePoliceForce msg) {
         EntityID victimId = msg.getAgentID();
-        
         if (msg.isHPDefined() && msg.getHP() == 0) return;
         if (!msg.isBuriednessDefined() || msg.getBuriedness() == 0) return;
         if (!msg.isPositionDefined()) return;
@@ -294,13 +326,11 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
             processedRescueMessages.add(victimId);
             rescueRequestTargets.add(victimId);
             rescuePriorityMap.put(victimId, PRIORITY_TYPE_POLICE);
-            System.err.println("[消防员分配器] 📨 收到警察救援请求: " + victimId);
         }
     }
 
     private void handleRescueRequest(MessageFireBrigade msg) {
         EntityID victimId = msg.getAgentID();
-        
         if (msg.isHPDefined() && msg.getHP() == 0) return;
         if (!msg.isBuriednessDefined() || msg.getBuriedness() == 0) return;
         if (!msg.isPositionDefined()) return;
@@ -309,13 +339,11 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
             processedRescueMessages.add(victimId);
             rescueRequestTargets.add(victimId);
             rescuePriorityMap.put(victimId, PRIORITY_TYPE_FIRE);
-            System.err.println("[消防员分配器] 📨 收到消防员救援请求: " + victimId);
         }
     }
 
     private void handleRescueRequest(MessageAmbulanceTeam msg) {
         EntityID victimId = msg.getAgentID();
-        
         if (msg.isHPDefined() && msg.getHP() == 0) return;
         if (!msg.isBuriednessDefined() || msg.getBuriedness() == 0) return;
         if (!msg.isPositionDefined()) return;
@@ -324,7 +352,6 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
             processedRescueMessages.add(victimId);
             rescueRequestTargets.add(victimId);
             rescuePriorityMap.put(victimId, PRIORITY_TYPE_AMBULANCE);
-            System.err.println("[消防员分配器] 📨 收到救护车救援请求: " + victimId);
         }
     }
 
@@ -343,7 +370,6 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
         if (mfb.isPositionDefined()) {
             info.currentPosition = mfb.getPosition();
         }
-        
         int currentTime = this.agentInfo.getTime();
         if (currentTime >= info.commandTime + 2) {
             updateFiremanInfo(info, mfb);
@@ -387,46 +413,31 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
                 releaseTask(info.currentTask, info.id);
                 info.currentTask = null;
                 info.isBusy = false;
-                completedRescues.add(info.currentTask);
-                System.err.println("[消防员分配器] ✅ 消防车 " + report.getSenderID() + " 完成任务: " + info.currentTask);
             }
         }
     }
 
-    // ========== 任务管理 ==========
     private void updateTaskQueue() {
-    int currentTime = this.agentInfo.getTime();
-    
-    for (EntityID target : rescueRequestTargets) {
-        if (!completedRescues.contains(target)) {
-            int currentCount = rescueAssignCount.getOrDefault(target, 0);
-            if (currentCount < MAX_AGENTS_PER_RESCUE) {
-                Integer priority = rescuePriorityMap.getOrDefault(target, PRIORITY_TYPE_CIVILIAN);
-                addTask(target, priority);
+        int currentTime = this.agentInfo.getTime();
+        
+        for (EntityID target : rescueRequestTargets) {
+            if (!completedRescues.contains(target)) {
+                int lockedCount = targetRescueCount.getOrDefault(target, 0);
+                int assignedCount = rescueAssignCount.getOrDefault(target, 0);
+                int totalCount = Math.max(lockedCount, assignedCount);
+                if (totalCount < MAX_AGENTS_PER_RESCUE) {
+                    Integer priority = rescuePriorityMap.getOrDefault(target, PRIORITY_TYPE_CIVILIAN);
+                    addTask(target, priority);
+                }
             }
         }
-    }
-    
-    for (EntityID target : fireTargets) {
-        addTask(target, PRIORITY_FIRE);
-    }
-    
-    taskQueue.removeIf(t -> currentTime - t.createTime > TASK_EXPIRE_TIME);
-    
-    // 统计任务队列中救援和灭火任务的数量
-    int rescueCount = 0;
-    int fireCount = 0;
-    for (Task t : taskQueue) {
-        if (t.priority <= PRIORITY_TYPE_CIVILIAN) {
-            rescueCount++;
-        } else if (t.priority == PRIORITY_FIRE) {
-            fireCount++;
+        
+        for (EntityID target : fireTargets) {
+            addTask(target, PRIORITY_FIRE);
         }
+        
+        taskQueue.removeIf(t -> currentTime - t.createTime > TASK_EXPIRE_TIME);
     }
-    System.err.println("[消防分配器] 时间=" + currentTime + 
-                       " 队列: 救援=" + rescueCount + 
-                       " 灭火=" + fireCount);
-}
 
     private void addTask(EntityID target, int priority) {
         for (Task t : taskQueue) {
@@ -436,65 +447,98 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
     }
 
     private void assignTasks() {
+        newAssignments.clear(); // 清空上一轮记录
+        
+        List<EntityID> idleFiremen = new ArrayList<>();
+        for (Map.Entry<EntityID, FireInfo> entry : firemanMap.entrySet()) {
+            if (entry.getValue().currentTask == null) {
+                idleFiremen.add(entry.getKey());
+            }
+        }
+        
+        if (idleFiremen.isEmpty()) {
+            return;
+        }
+        
         List<Task> tasks = new ArrayList<>(taskQueue);
         tasks.sort(Comparator.comparingInt(t -> t.priority));
         
-        Set<EntityID> assignedThisRound = new HashSet<>();
+        Map<EntityID, Integer> roundAssignCount = new HashMap<>();
         
-        for (Task task : tasks) {
-            if (assignedThisRound.contains(task.target)) continue;
-            
-            int currentCount = rescueAssignCount.getOrDefault(task.target, 0);
-            if (task.priority != PRIORITY_FIRE && currentCount >= MAX_AGENTS_PER_RESCUE) {
-                continue;
-            }
-            
-            EntityID bestFireman = findBestIdleFireman(task.target);
-            if (bestFireman != null) {
-                assignTaskToFireman(bestFireman, task.target, task.priority);
-                assignedThisRound.add(task.target);
-                rescueAssignCount.put(task.target, currentCount + 1);
+        for (EntityID firemanId : idleFiremen) {
+            Task selectedTask = null;
+            for (Task task : tasks) {
+                EntityID target = task.target;
                 
-                String typeName = (task.priority == PRIORITY_FIRE) ? "灭火" : "救援";
-                System.err.println("[消防员分配器] ✅ 分配" + typeName + "任务: 消防车=" + bestFireman + 
-                                   " 目标=" + task.target);
+                // ========== 新增：分配前再次检查目标是否有效 ==========
+                if (isVictimCompleted(target)) {
+                    completedRescues.add(target);
+                    rescueRequestTargets.remove(target);
+                    continue;
+                }
+                // ==============================================
+                
+                int lockedCount = targetRescueCount.getOrDefault(target, 0);
+                int assignedCount = rescueAssignCount.getOrDefault(target, 0);
+                int roundCount = roundAssignCount.getOrDefault(target, 0);
+                int totalCount = Math.max(lockedCount, assignedCount) + roundCount;
+                
+                if (totalCount >= MAX_AGENTS_PER_RESCUE) {
+                    continue;
+                }
+                
+                selectedTask = task;
+                break;
             }
-        }
-        
-        taskQueue.removeIf(t -> assignedThisRound.contains(t.target));
-        rescueRequestTargets.removeAll(assignedThisRound);
-        fireTargets.removeAll(assignedThisRound);
-    }
-
-    private EntityID findBestIdleFireman(EntityID target) {
-        EntityID bestFireman = null;
-        double bestDistance = Double.MAX_VALUE;
-        
-        EntityID targetPos = getTargetPosition(target);
-        if (targetPos == null) return null;
-        
-        for (Map.Entry<EntityID, FireInfo> entry : firemanMap.entrySet()) {
-            FireInfo info = entry.getValue();
-            if (info.currentTask != null) continue;
             
-            double distance = getDistance(entry.getKey(), targetPos);
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                bestFireman = entry.getKey();
+            if (selectedTask == null) {
+                for (EntityID target : rescueRequestTargets) {
+                    if (isVictimCompleted(target)) {
+                        completedRescues.add(target);
+                        continue;
+                    }
+                    int lockedCount = targetRescueCount.getOrDefault(target, 0);
+                    int assignedCount = rescueAssignCount.getOrDefault(target, 0);
+                    int roundCount = roundAssignCount.getOrDefault(target, 0);
+                    int totalCount = Math.max(lockedCount, assignedCount) + roundCount;
+                    if (totalCount < MAX_AGENTS_PER_RESCUE) {
+                        selectedTask = new Task(target, rescuePriorityMap.getOrDefault(target, PRIORITY_TYPE_CIVILIAN), 0);
+                        break;
+                    }
+                }
+            }
+            
+            if (selectedTask != null) {
+                EntityID target = selectedTask.target;
+                assignTaskToFireman(firemanId, target, selectedTask.priority);
+                roundAssignCount.put(target, roundAssignCount.getOrDefault(target, 0) + 1);
+                rescueAssignCount.put(target, rescueAssignCount.getOrDefault(target, 0) + 1);
+                newAssignments.put(firemanId, target);  // 记录本轮新分配
+                
+                /*System.err.println("[消防员分配器] ✅ 分配救援任务: 消防车=" + firemanId + 
+                                   " 目标=" + target + " (当前参与数=" + 
+                                   (targetRescueCount.getOrDefault(target, 0) + roundAssignCount.get(target)) + 
+                                   "/" + MAX_AGENTS_PER_RESCUE + ")");*/
             }
         }
-        return bestFireman;
-    }
-
-    private EntityID getTargetPosition(EntityID target) {
-        StandardEntity e = worldInfo.getEntity(target);
-        if (e instanceof Human) {
-            Human h = (Human) e;
-            return h.isPositionDefined() ? h.getPosition() : null;
-        } else if (e instanceof Building) {
-            return target;
-        }
-        return null;
+        
+        rescueRequestTargets.removeIf(target -> {
+            if (isVictimCompleted(target)) {
+                completedRescues.add(target);
+                return true;
+            }
+            int lockedCount = targetRescueCount.getOrDefault(target, 0);
+            int assignedCount = rescueAssignCount.getOrDefault(target, 0);
+            return Math.max(lockedCount, assignedCount) >= MAX_AGENTS_PER_RESCUE;
+        });
+        
+        fireTargets.removeIf(id -> {
+            StandardEntity e = worldInfo.getEntity(id);
+            return !(e instanceof Building) || !((Building) e).isOnFire();
+        });
+        
+        System.err.printf("[消防分配器] 时间=%d 队列: 救援=%d 灭火=%d 已分配消防车=%d%n",
+                this.agentInfo.getTime(), rescueRequestTargets.size(), fireTargets.size(), assignedFiremanTasks.size());
     }
 
     private void assignTaskToFireman(EntityID firemanId, EntityID task, int priority) {
@@ -502,6 +546,9 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
         tasksInProgress.add(task);
         FireInfo info = firemanMap.get(firemanId);
         if (info != null) {
+            if (info.currentTask != null && !info.currentTask.equals(task)) {
+                releaseTask(info.currentTask, info.id);
+            }
             info.currentTask = task;
             info.currentTaskPriority = priority;
             info.isBusy = true;
@@ -512,7 +559,6 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
     private void releaseTask(EntityID task, EntityID agentId) {
         tasksInProgress.remove(task);
         assignedFiremanTasks.remove(agentId);
-        
         int count = rescueAssignCount.getOrDefault(task, 0);
         if (count > 0) {
             rescueAssignCount.put(task, count - 1);
@@ -520,11 +566,9 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
     }
 
     private void checkTaskCompletion() {
-        // 通过世界模型检查任务是否完成
         for (Map.Entry<EntityID, EntityID> entry : new HashMap<>(assignedFiremanTasks).entrySet()) {
             EntityID agentId = entry.getKey();
             EntityID task = entry.getValue();
-            
             if (isVictimCompleted(task)) {
                 releaseTask(task, agentId);
                 FireInfo info = firemanMap.get(agentId);
@@ -533,15 +577,12 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
                     info.isBusy = false;
                 }
                 completedRescues.add(task);
-                System.err.println("[消防员分配器] ✅ 救援完成: " + task);
             }
         }
         
-        // 检查灭火任务完成
         for (Map.Entry<EntityID, EntityID> entry : new HashMap<>(assignedFiremanTasks).entrySet()) {
             EntityID agentId = entry.getKey();
             EntityID task = entry.getValue();
-            
             StandardEntity e = worldInfo.getEntity(task);
             if (e instanceof Building) {
                 Building b = (Building) e;
@@ -552,7 +593,6 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
                         info.currentTask = null;
                         info.isBusy = false;
                     }
-                    System.err.println("[消防员分配器] ✅ 灭火完成: " + task);
                 }
             }
         }
@@ -573,7 +613,6 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
         return worldInfo.getDistance(from, to);
     }
 
-    // ========== 内部类 ==========
     private static class Task {
         EntityID target;
         int priority;
