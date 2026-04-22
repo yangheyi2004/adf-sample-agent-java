@@ -468,11 +468,11 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         taskQueue.removeIf(t -> t.roadId.equals(roadId));
         
         if (removed) {
-            System.err.printf("[警察分配器] 清理道路 %s: 紧急=%d→%d, 救援=%d→%d, 关键=%d→%d%n",
+            /*System.err.printf("[警察分配器] 清理道路 %s: 紧急=%d→%d, 救援=%d→%d, 关键=%d→%d%n",
                     roadId,
                     beforeUrgent, urgentRequests.size(),
                     beforeRescue, rescueRoutes.size(),
-                    beforeCritical, criticalRoads.size());
+                    beforeCritical, criticalRoads.size());*/
         }
     }
 

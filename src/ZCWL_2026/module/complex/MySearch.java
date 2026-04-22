@@ -23,14 +23,15 @@ import static rescuecore2.standard.entities.StandardEntityURN.*;
  * 搜索模块 - 只负责搜索未探索建筑
  * 
  * 策略：
- * 1. 优先探索本区域内的建筑
- * 2. 本区域探索完成后，切换到全局探索
+ * - 消防/救护：优先探索本区域内建筑（SampleKMeans聚类）
+ * - 警察：优先探索本簇道路连通区域内的建筑（PoliceBalancedClustering）
  */
 public class MySearch extends Search {
     
     // ==================== 核心组件 ====================
     private PathPlanning pathPlanning;
-    private Clustering clustering;
+    private Clustering clustering;                  // SampleKMeans (消防/救护)
+    private Clustering policeClustering;            // PoliceBalancedClustering (警察)
     private StandardEntityURN agentType;
     
     // ==================== 建筑搜索相关 ====================
@@ -41,9 +42,11 @@ public class MySearch extends Search {
     // ==================== 区域探索相关 ====================
     private Set<EntityID> zoneBuildings;
     private Set<EntityID> zoneUnsearched;
-    private Collection<EntityID> myClusterBuildings;
     private boolean zoneCompleted;
     private int zoneTotalCount;
+    
+    // ==================== BFS 深度配置 ====================
+    private static final int POLICE_BFS_DEPTH = 4;   // 警察从道路出发搜索建筑的深度
     
     // ==================== 警察上报相关 ====================
     private Set<EntityID> reportedVictimBuildingsByPolice;
@@ -60,7 +63,6 @@ public class MySearch extends Search {
         this.searchedBuildings = new HashSet<>();
         this.zoneBuildings = new HashSet<>();
         this.zoneUnsearched = new HashSet<>();
-        this.myClusterBuildings = new ArrayList<>();
         this.reportedVictimBuildingsByPolice = new HashSet<>();
         this.agentType = ai.me().getStandardURN();
         this.result = null;
@@ -92,21 +94,39 @@ public class MySearch extends Search {
                     this.pathPlanning = moduleManager.getModule(
                         "MySearch.PathPlanning.Police", 
                         "ZCWL_2026.module.algorithm.PathPlanning");
-                    this.clustering = moduleManager.getModule(
-                        "MySearch.Clustering.Police", 
-                        "ZCWL_2026.module.algorithm.SampleKMeans");
+                    // 警察使用专用的均衡聚类
+                    this.policeClustering = moduleManager.getModule(
+                        "MySearch.PoliceClustering", 
+                        "ZCWL_2026.module.algorithm.PoliceBalancedClustering");
                 }
                 break;
         }
 
         registerModule(this.pathPlanning);
-        registerModule(this.clustering);
+        if (this.clustering != null) {
+            registerModule(this.clustering);
+        }
+        if (this.policeClustering != null) {
+            registerModule(this.policeClustering);
+        }
     }
     
+    /**
+     * 初始化本区域建筑集合
+     * - 消防/救护：使用 SampleKMeans 聚类结果
+     * - 警察：使用 PoliceBalancedClustering 获取本簇道路，BFS 搜索连通建筑
+     */
     private void initZoneBuildings() {
         this.zoneBuildings.clear();
         this.zoneUnsearched.clear();
         
+        // 警察分支
+        if (this.agentType == POLICE_FORCE && this.policeClustering != null) {
+            initPoliceZoneBuildings();
+            return;
+        }
+        
+        // 消防/救护分支 (原有逻辑)
         if (this.clustering != null) {
             try {
                 this.clustering.calc();
@@ -114,8 +134,7 @@ public class MySearch extends Search {
                 if (clusterIndex >= 0) {
                     Collection<EntityID> clusterIds = this.clustering.getClusterEntityIDs(clusterIndex);
                     if (clusterIds != null && !clusterIds.isEmpty()) {
-                        this.myClusterBuildings = new ArrayList<>(clusterIds);
-                        for (EntityID id : this.myClusterBuildings) {
+                        for (EntityID id : clusterIds) {
                             StandardEntity entity = this.worldInfo.getEntity(id);
                             if (entity instanceof Building && entity.getStandardURN() != REFUGE) {
                                 this.zoneBuildings.add(id);
@@ -123,8 +142,6 @@ public class MySearch extends Search {
                             }
                         }
                         this.zoneTotalCount = this.zoneBuildings.size();
-                        /*System.err.println("[MySearch] 聚类返回实体数: " + this.myClusterBuildings.size() +
-                                           ", 本区域建筑数: " + this.zoneTotalCount);*/
                         return;
                     }
                 }
@@ -136,17 +153,109 @@ public class MySearch extends Search {
         System.err.println("[MySearch] 无法获取本区域建筑，将直接使用全局探索");
     }
     
+    /**
+     * 警察专用：基于本簇道路 BFS 搜索连通建筑
+     */
+    private void initPoliceZoneBuildings() {
+        try {
+            this.policeClustering.calc();
+            int clusterIndex = this.policeClustering.getClusterIndex(this.agentInfo.getID());
+            if (clusterIndex < 0) {
+                System.err.println("[MySearch] 警察 " + this.agentInfo.getID() + " 未分配到任何簇");
+                this.zoneTotalCount = 0;
+                return;
+            }
+            
+            // 获取本簇内的所有道路
+            Collection<EntityID> clusterRoads = this.policeClustering.getClusterEntityIDs(clusterIndex);
+            if (clusterRoads == null || clusterRoads.isEmpty()) {
+                System.err.println("[MySearch] 警察 " + this.agentInfo.getID() + " 的簇没有道路");
+                this.zoneTotalCount = 0;
+                return;
+            }
+            
+            // 从这些道路出发 BFS 搜索建筑
+            Set<EntityID> foundBuildings = bfsBuildingsFromRoads(clusterRoads, POLICE_BFS_DEPTH);
+            
+            for (EntityID buildingId : foundBuildings) {
+                StandardEntity entity = this.worldInfo.getEntity(buildingId);
+                if (entity instanceof Building && entity.getStandardURN() != REFUGE) {
+                    this.zoneBuildings.add(buildingId);
+                    this.zoneUnsearched.add(buildingId);
+                }
+            }
+            
+            this.zoneTotalCount = this.zoneBuildings.size();
+            System.err.println("[MySearch] 警察 " + this.agentInfo.getID() + 
+                               " 从 " + clusterRoads.size() + " 条道路出发，发现 " + 
+                               this.zoneTotalCount + " 个连通建筑");
+        } catch (Exception e) {
+            System.err.println("[MySearch] 警察区域建筑初始化失败: " + e.getMessage());
+            this.zoneTotalCount = 0;
+        }
+    }
+    
+    /**
+     * 从给定的道路集合出发，BFS 搜索指定深度内的所有建筑
+     * @param seedRoads 起始道路集合
+     * @param maxDepth 最大搜索深度
+     * @return 搜索到的建筑 ID 集合
+     */
+    private Set<EntityID> bfsBuildingsFromRoads(Collection<EntityID> seedRoads, int maxDepth) {
+        Set<EntityID> buildings = new HashSet<>();
+        Set<EntityID> visited = new HashSet<>();
+        Queue<EntityID> queue = new LinkedList<>();
+        
+        // 初始化队列：所有种子道路
+        for (EntityID roadId : seedRoads) {
+            StandardEntity e = this.worldInfo.getEntity(roadId);
+            if (e instanceof Road) {
+                queue.add(roadId);
+                visited.add(roadId);
+            }
+        }
+        
+        int depth = 0;
+        while (!queue.isEmpty() && depth <= maxDepth) {
+            int levelSize = queue.size();
+            for (int i = 0; i < levelSize; i++) {
+                EntityID currentId = queue.poll();
+                StandardEntity current = this.worldInfo.getEntity(currentId);
+                if (current == null) continue;
+                
+                // 如果是建筑，加入结果集（但不继续从建筑向外扩展，保持搜索在道路网络上）
+                if (current instanceof Building) {
+                    buildings.add(currentId);
+                    continue;
+                }
+                
+                // 如果是道路，检查邻居
+                if (current instanceof Road) {
+                    Road road = (Road) current;
+                    for (EntityID neighborId : road.getNeighbours()) {
+                        if (visited.contains(neighborId)) continue;
+                        visited.add(neighborId);
+                        
+                        StandardEntity neighbor = this.worldInfo.getEntity(neighborId);
+                        if (neighbor instanceof Building) {
+                            buildings.add(neighborId);
+                            // 建筑不加入队列，但已访问标记防止重复
+                        } else if (neighbor instanceof Road) {
+                            queue.add(neighborId);
+                        }
+                    }
+                }
+            }
+            depth++;
+        }
+        
+        return buildings;
+    }
+    
     private void updateZoneProgress() {
         if (zoneCompleted) return;
-        int beforeCount = zoneUnsearched.size();
         for (EntityID searched : searchedBuildings) {
             zoneUnsearched.remove(searched);
-        }
-        int afterCount = zoneUnsearched.size();
-        if (beforeCount != afterCount && zoneTotalCount > 0) {
-            int remaining = zoneUnsearched.size();
-            int explored = zoneTotalCount - remaining;
-            //System.err.println("[MySearch] 区域探索进度: " + explored + "/" + zoneTotalCount);
         }
         if (zoneUnsearched.isEmpty() && zoneTotalCount > 0 && !zoneCompleted) {
             zoneCompleted = true;
@@ -186,8 +295,6 @@ public class MySearch extends Search {
         initFullMapBuildings();
         updateCurrentTargets();
         initialized = true;
-        /*System.err.println("[MySearch] 初始化完成，当前模式: " + 
-                           (zoneTotalCount > 0 ? "区域优先（" + zoneTotalCount + "个建筑）" : "全局探索"));*/
     }
 
     @Override
@@ -216,8 +323,6 @@ public class MySearch extends Search {
                             MessageCivilian msgCivilian = new MessageCivilian(true, c);
                             messageManager.addMessage(msgCivilian);
                             reportedVictimBuildingsByPolice.add(buildingId);
-                            /*System.err.println("[MySearch] 警察 " + this.agentInfo.getID() + 
-                                               " 视野发现被困平民 " + c.getID() + " 于建筑 " + buildingId + "，语音已上报");*/
                         }
                     }
                 }
@@ -239,8 +344,6 @@ public class MySearch extends Search {
                                     MessageCivilian msgCivilian = new MessageCivilian(true, c);
                                     messageManager.addMessage(msgCivilian);
                                     found = true;
-                                    /*System.err.println("[MySearch] 警察 " + this.agentInfo.getID() + 
-                                                       " 进入建筑 " + building.getID() + " 发现被困平民 " + c.getID() + "，语音已上报");*/
                                 }
                             }
                         }
@@ -342,6 +445,7 @@ public class MySearch extends Search {
         super.precompute(precomputeData);
         if (this.getCountPrecompute() >= 2) return this;
         if (this.clustering != null) this.clustering.precompute(precomputeData);
+        if (this.policeClustering != null) this.policeClustering.precompute(precomputeData);
         if (this.pathPlanning != null) this.pathPlanning.precompute(precomputeData);
         return this;
     }
@@ -351,6 +455,7 @@ public class MySearch extends Search {
         super.resume(precomputeData);
         if (this.getCountResume() >= 2) return this;
         if (this.clustering != null) this.clustering.resume(precomputeData);
+        if (this.policeClustering != null) this.policeClustering.resume(precomputeData);
         if (this.pathPlanning != null) this.pathPlanning.resume(precomputeData);
         this.worldInfo.requestRollback();
         return this;
@@ -361,6 +466,7 @@ public class MySearch extends Search {
         super.preparate();
         if (this.getCountPreparate() >= 2) return this;
         if (this.clustering != null) this.clustering.preparate();
+        if (this.policeClustering != null) this.policeClustering.preparate();
         if (this.pathPlanning != null) this.pathPlanning.preparate();
         this.worldInfo.requestRollback();
         return this;

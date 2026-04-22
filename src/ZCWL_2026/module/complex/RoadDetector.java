@@ -61,6 +61,9 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
     private int lastLogTime = 0;
     private static final int LOG_INTERVAL = 10;
 
+    // ========== 新增：警察聚类模块引用 ==========
+    private adf.core.component.module.algorithm.Clustering policeClustering;
+
     public RoadDetector(AgentInfo ai, WorldInfo wi, ScenarioInfo si, ModuleManager moduleManager, DevelopData developData) {
         super(ai, wi, si, moduleManager, developData);
         
@@ -77,9 +80,14 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
             case PRECOMPUTED:
             case NON_PRECOMPUTE:
                 this.pathPlanning = moduleManager.getModule("RoadDetector.PathPlanning", "ZCWL_2026.module.algorithm.PathPlanning");
+                // 获取警察均衡聚类模块实例（）
+                this.policeClustering = moduleManager.getModule("RoadDetector.PoliceClustering", "ZCWL_2026.module.algorithm.PoliceBalancedClustering");
                 break;
         }
         registerModule(this.pathPlanning);
+        if (this.policeClustering != null) {
+            registerModule(this.policeClustering);
+        }
         this.result = null;
         
         //System.err.println("[RoadDetector] 警察 " + agentInfo.getID() + " 道路检测器已加载（优先级：避难所 > 被困建筑 > 视觉上报）");
@@ -147,7 +155,7 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                     return this;
                 }
                 
-                // 按优先级选择目标道路
+                // 按优先级选择目标道路（自动过滤非本簇道路，并支持跨区借用）
                 EntityID selectedRoad = selectTargetByPriority(positionID, myId);
                 
                 if (selectedRoad != null) {
@@ -171,22 +179,23 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
 
     /**
      * 按优先级选择目标道路：避难所 > 被困建筑 > 视觉上报
+     * 支持跨区借用：若本区无可用道路，则从其他区域借用（优先任务最多的区域）
      */
     private EntityID selectTargetByPriority(EntityID positionID, EntityID myId) {
         // 优先级1：避难所周边的道路
-        EntityID selected = selectFromSet(positionID, myId, refugeAreaRoads);
+        EntityID selected = selectFromSet(positionID, myId, refugeAreaRoads, true);
         if (selected != null) {
             return selected;
         }
         
         // 优先级2：被困建筑周边的道路
-        selected = selectFromSet(positionID, myId, victimBuildingRoads);
+        selected = selectFromSet(positionID, myId, victimBuildingRoads, true);
         if (selected != null) {
             return selected;
         }
         
         // 优先级3：救援单位视觉上报的道路
-        selected = selectFromSet(positionID, myId, reportedVisionRoads);
+        selected = selectFromSet(positionID, myId, reportedVisionRoads, true);
         if (selected != null) {
             return selected;
         }
@@ -195,10 +204,12 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
     }
 
     /**
-     * 从指定集合中选择最近的未被锁定的道路
+     * 从指定集合中选择最近的未被锁定的道路，支持跨区借用
+     * @param restrictToMyCluster 是否限制为本簇道路（true表示优先本簇，但若无则跨区）
      */
-    private EntityID selectFromSet(EntityID positionID, EntityID myId, Set<EntityID> roadSet) {
+    private EntityID selectFromSet(EntityID positionID, EntityID myId, Set<EntityID> roadSet, boolean restrictToMyCluster) {
         Set<EntityID> availableRoads = new HashSet<>(roadSet);
+        // 移除被其他警察锁定的道路
         availableRoads.removeIf(roadId -> {
             LockInfo info = lockedRoads.get(roadId);
             return info != null && !info.policeId.equals(myId);
@@ -208,8 +219,67 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
             return null;
         }
         
+        EntityID selected = null;
+        
+        if (policeClustering != null) {
+            int myCluster = policeClustering.getClusterIndex(myId);
+            if (myCluster >= 0) {
+                // 先尝试从本簇选择
+                Set<EntityID> myClusterRoads = new HashSet<>(availableRoads);
+                myClusterRoads.removeIf(roadId -> policeClustering.getClusterIndex(roadId) != myCluster);
+                
+                if (!myClusterRoads.isEmpty()) {
+                    selected = selectNearestFromSet(positionID, myClusterRoads);
+                    if (selected != null) {
+                        return selected;
+                    }
+                }
+                
+                // 本簇无可用道路，则从其他簇借用（优先选择任务最多的簇）
+                if (restrictToMyCluster) {
+                    Map<Integer, List<EntityID>> clusterToRoads = new HashMap<>();
+                    for (EntityID roadId : availableRoads) {
+                        int cluster = policeClustering.getClusterIndex(roadId);
+                        if (cluster >= 0) {
+                            clusterToRoads.computeIfAbsent(cluster, k -> new ArrayList<>()).add(roadId);
+                        }
+                    }
+                    
+                    // 找到道路数量最多的簇
+                    int bestCluster = -1;
+                    int maxCount = -1;
+                    for (Map.Entry<Integer, List<EntityID>> entry : clusterToRoads.entrySet()) {
+                        if (entry.getValue().size() > maxCount) {
+                            maxCount = entry.getValue().size();
+                            bestCluster = entry.getKey();
+                        }
+                    }
+                    
+                    if (bestCluster >= 0) {
+                        Set<EntityID> borrowRoads = new HashSet<>(clusterToRoads.get(bestCluster));
+                        selected = selectNearestFromSet(positionID, borrowRoads);
+                        if (selected != null) {
+                            System.err.println("[RoadDetector] 警察 " + myId + " 本区无任务，从簇 " + bestCluster + " 借用道路 (任务数=" + maxCount + ")");
+                            return selected;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 降级：直接选最近的（不区分簇）
+        return selectNearestFromSet(positionID, availableRoads);
+    }
+    
+    /**
+     * 从给定集合中选择路径最近的可用道路
+     */
+    private EntityID selectNearestFromSet(EntityID positionID, Set<EntityID> roadSet) {
+        if (roadSet.isEmpty()) {
+            return null;
+        }
         this.pathPlanning.setFrom(positionID);
-        this.pathPlanning.setDestination(availableRoads);
+        this.pathPlanning.setDestination(roadSet);
         List<EntityID> path = this.pathPlanning.calc().getResult();
         if (path != null && !path.isEmpty()) {
             return path.get(path.size() - 1);

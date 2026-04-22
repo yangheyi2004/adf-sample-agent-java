@@ -27,6 +27,9 @@ import static rescuecore2.standard.entities.StandardEntityURN.ROAD;
  * 1. 将道路划分为与警察数量相等的簇，确保各簇道路数量均衡
  * 2. 考虑警察初始位置，将警察分配到最近的簇
  * 3. 支持动态调整（如果警察移动后远离自己的区域）
+ * 
+ * 注意：本聚类仅处理道路实体，用于警察任务分配。
+ * 建筑搜索通过 MySearch 中基于本簇道路的 BFS 实现，无需在此处包含建筑。
  */
 public class PoliceBalancedClustering extends Clustering {
 
@@ -52,8 +55,6 @@ public class PoliceBalancedClustering extends Clustering {
         this.policeToClusterMap = new HashMap<>();
         this.clusterCenters = new HashMap<>();
         this.isInitialized = false;
-        
-        //System.err.println("[警察均衡聚类] 初始化，警察数量=" + clusterSize);
     }
 
     @Override
@@ -109,39 +110,40 @@ public class PoliceBalancedClustering extends Clustering {
         }
     }
     
-   /**
- * 收集所有警察的初始位置
- */
-private void collectPolice() {
-    allPolice = new ArrayList<>();
-    for (StandardEntity e : this.worldInfo.getEntitiesOfType(POLICE_FORCE)) {
-        if (e instanceof PoliceForce) {
-            PoliceForce police = (PoliceForce) e;
-            
-            // 优先使用警察自身的坐标
-            if (police.isXDefined() && police.isYDefined()) {
-                allPolice.add(new PoliceWithLocation(police.getID(), police.getX(), police.getY()));
-            } 
-            // 否则使用位置实体的坐标
-            else if (police.isPositionDefined()) {
-                StandardEntity pos = this.worldInfo.getEntity(police.getPosition());
-                if (pos != null) {
-                    Pair<Integer, Integer> location = this.worldInfo.getLocation(pos);
-                    if (location != null) {
-                        allPolice.add(new PoliceWithLocation(police.getID(), location.first(), location.second()));
+    /**
+     * 收集所有警察的初始位置
+     */
+    private void collectPolice() {
+        allPolice = new ArrayList<>();
+        for (StandardEntity e : this.worldInfo.getEntitiesOfType(POLICE_FORCE)) {
+            if (e instanceof PoliceForce) {
+                PoliceForce police = (PoliceForce) e;
+                
+                // 优先使用警察自身的坐标
+                if (police.isXDefined() && police.isYDefined()) {
+                    allPolice.add(new PoliceWithLocation(police.getID(), police.getX(), police.getY()));
+                } 
+                // 否则使用位置实体的坐标
+                else if (police.isPositionDefined()) {
+                    StandardEntity pos = this.worldInfo.getEntity(police.getPosition());
+                    if (pos != null) {
+                        Pair<Integer, Integer> location = this.worldInfo.getLocation(pos);
+                        if (location != null) {
+                            allPolice.add(new PoliceWithLocation(police.getID(), location.first(), location.second()));
+                        }
                     }
                 }
             }
         }
-    }
-    
-    // 如果没有获取到任何警察位置，使用警察ID（兜底方案）
-    if (allPolice.isEmpty()) {
-        for (StandardEntity e : this.worldInfo.getEntitiesOfType(POLICE_FORCE)) {
-            allPolice.add(new PoliceWithLocation(e.getID(), 0, 0));
+        
+        // 如果没有获取到任何警察位置，使用警察ID（兜底方案）
+        if (allPolice.isEmpty()) {
+            for (StandardEntity e : this.worldInfo.getEntitiesOfType(POLICE_FORCE)) {
+                allPolice.add(new PoliceWithLocation(e.getID(), 0, 0));
+            }
         }
     }
-}
+    
     /**
      * 递归二分，直到得到 k 个簇
      * 确保每个簇的道路数量大致相等
@@ -355,14 +357,6 @@ private void collectPolice() {
             clusterAssignCount.put(assignment.clusterIndex,
                 clusterAssignCount.getOrDefault(assignment.clusterIndex, 0) + 1);
         }
-        
-        // 输出分配结果
-       /*  System.err.println("[警察均衡聚类] 警察分配结果:");
-        for (Map.Entry<EntityID, Integer> entry : policeToClusterMap.entrySet()) {
-            int clusterSize = clusterEntityIDsList.get(entry.getValue()).size();
-            System.err.println("  警察 " + entry.getKey() + " -> 簇 " + entry.getValue() + 
-                               " (道路数=" + clusterSize + ")");
-        }*/
     }
     
     /**
@@ -387,16 +381,10 @@ private void collectPolice() {
     
     /**
      * 获取警察当前应负责的区域（考虑动态调整）
-     * 如果警察当前位置离自己的区域很远，可以重新分配
      */
     public int getDynamicClusterIndex(EntityID policeId) {
-        // 先获取静态分配
         Integer staticIndex = policeToClusterMap.get(policeId);
-        if (staticIndex == null) return -1;
-        
-        // 可选：检查警察当前位置，如果离自己的区域太远，找最近的簇
-        // 这里可以根据需要启用动态调整
-        return staticIndex;
+        return staticIndex != null ? staticIndex : -1;
     }
     
     private double distSq(RoadWithLocation a, RoadWithLocation b) {
@@ -412,9 +400,6 @@ private void collectPolice() {
             if (s < min) min = s;
             if (s > max) max = s;
         }
-        /*System.err.println("[警察均衡聚类] 完成聚类，警察数量=" + clusterSize +
-                           ", 总道路数=" + allRoads.size() +
-                           ", 簇道路数范围: " + min + " ~ " + max);*/
     }
 
     // ==================== Clustering 接口实现 ====================
