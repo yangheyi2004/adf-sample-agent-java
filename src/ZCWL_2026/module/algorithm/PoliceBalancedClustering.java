@@ -17,54 +17,46 @@ import rescuecore2.worldmodel.EntityID;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import static rescuecore2.standard.entities.StandardEntityURN.POLICE_FORCE;
-import static rescuecore2.standard.entities.StandardEntityURN.ROAD;
+import static rescuecore2.standard.entities.StandardEntityURN.*;
 
-/**
- * 警察专用道路均衡聚类 - 增强版
- * 
- * 功能：
- * 1. 将道路划分为与警察数量相等的簇，确保各簇道路数量均衡
- * 2. 考虑警察初始位置，将警察分配到最近的簇
- * 3. 支持动态调整（如果警察移动后远离自己的区域）
- * 
- * 注意：本聚类仅处理道路实体，用于警察任务分配。
- * 建筑搜索通过 MySearch 中基于本簇道路的 BFS 实现，无需在此处包含建筑。
- */
 public class PoliceBalancedClustering extends Clustering {
 
-    private int clusterSize;                           // 簇数量（等于警察数量）
-    private List<List<EntityID>> clusterEntityIDsList; // 每个簇的道路ID列表
-    private Map<EntityID, Integer> roadToClusterMap;   // 道路ID -> 所属簇索引
-    private Map<EntityID, Integer> policeToClusterMap; // 警察ID -> 所属簇索引
-    private Map<Integer, Point2D> clusterCenters;      // 簇中心点坐标
+    private int clusterSize;
+    private List<List<EntityID>> clusterEntityIDsList;
+    private Map<EntityID, Integer> roadToClusterMap;
+    private Map<EntityID, Integer> policeToClusterMap;
+    private Map<Integer, Point2D> clusterCenters;
     
-    private List<RoadWithLocation> allRoads;           // 所有道路及其坐标
-    private List<PoliceWithLocation> allPolice;        // 所有警察及其初始位置
+    private List<RoadWithLocation> allRoads;
+    private List<PoliceWithLocation> allPolice;
     
-    private int repeat;                                // KMeans迭代次数
-    private boolean isInitialized;                     // 是否已初始化
+    private int repeat;
+    private boolean isInitialized;
+    
+    private Map<Integer, Integer> clusterRoadCount;
+    private int minRoadCount = 0;
+    private int maxRoadCount = 0;
 
     public PoliceBalancedClustering(AgentInfo ai, WorldInfo wi, ScenarioInfo si,
                                     ModuleManager moduleManager, DevelopData developData) {
         super(ai, wi, si, moduleManager, developData);
         this.repeat = developData.getInteger("PoliceBalancedClustering.repeat", 10);
-        this.clusterSize = si.getScenarioAgentsPf();   // 警察数量
+        this.clusterSize = si.getScenarioAgentsPf();
         this.clusterEntityIDsList = new ArrayList<>();
         this.roadToClusterMap = new HashMap<>();
         this.policeToClusterMap = new HashMap<>();
         this.clusterCenters = new HashMap<>();
+        this.clusterRoadCount = new HashMap<>();
         this.isInitialized = false;
+        
+        System.err.println("[警察均衡聚类] 初始化，警察数量=" + clusterSize);
     }
 
     @Override
     public Clustering calc() {
-        if (isInitialized) return this;  // 只计算一次
+        if (isInitialized) return this;
         
-        // 1. 收集所有道路的坐标
         collectRoads();
-        
-        // 2. 收集所有警察的初始位置
         collectPolice();
         
         if (allRoads.isEmpty()) {
@@ -77,16 +69,14 @@ public class PoliceBalancedClustering extends Clustering {
             return this;
         }
         
-        // 3. 递归二分，得到 K 个簇（K = 警察数量）
         List<List<RoadWithLocation>> roadClusters = recursiveSplit(allRoads, clusterSize);
         
-        // 4. 计算每个簇的中心点
         computeClusterCenters(roadClusters);
         
-        // 5. 构建 clusterEntityIDsList 和 roadToClusterMap
         buildRoadMappings(roadClusters);
         
-        // 6. 将警察分配到最近的簇（基于初始位置）
+        calculateLoadBalance();
+        
         assignPoliceToNearestCluster();
         
         isInitialized = true;
@@ -95,9 +85,29 @@ public class PoliceBalancedClustering extends Clustering {
         return this;
     }
     
-    /**
-     * 收集所有道路的坐标
-     */
+    private void calculateLoadBalance() {
+        clusterRoadCount.clear();
+        for (int i = 0; i < clusterEntityIDsList.size(); i++) {
+            clusterRoadCount.put(i, clusterEntityIDsList.get(i).size());
+        }
+        
+        minRoadCount = clusterRoadCount.values().stream().min(Integer::compareTo).orElse(0);
+        maxRoadCount = clusterRoadCount.values().stream().max(Integer::compareTo).orElse(0);
+        
+        double avgRoadCount = clusterEntityIDsList.stream()
+            .mapToInt(List::size)
+            .average()
+            .orElse(0);
+        
+        System.err.printf("[警察均衡聚类] 负载均衡: 总道路=%d, 簇数=%d, 平均=%.1f, 最小=%d, 最大=%d%n",
+            allRoads.size(), clusterEntityIDsList.size(), avgRoadCount, minRoadCount, maxRoadCount);
+        
+        for (int i = 0; i < clusterEntityIDsList.size(); i++) {
+            System.err.printf("[警察均衡聚类] 簇%d: 道路数=%d%n", 
+                i, clusterEntityIDsList.get(i).size());
+        }
+    }
+    
     private void collectRoads() {
         allRoads = new ArrayList<>();
         for (StandardEntity e : this.worldInfo.getEntitiesOfType(ROAD)) {
@@ -108,22 +118,18 @@ public class PoliceBalancedClustering extends Clustering {
                 }
             }
         }
+        System.err.println("[警察均衡聚类] 收集到 " + allRoads.size() + " 条道路");
     }
     
-    /**
-     * 收集所有警察的初始位置
-     */
     private void collectPolice() {
         allPolice = new ArrayList<>();
         for (StandardEntity e : this.worldInfo.getEntitiesOfType(POLICE_FORCE)) {
             if (e instanceof PoliceForce) {
                 PoliceForce police = (PoliceForce) e;
                 
-                // 优先使用警察自身的坐标
                 if (police.isXDefined() && police.isYDefined()) {
                     allPolice.add(new PoliceWithLocation(police.getID(), police.getX(), police.getY()));
                 } 
-                // 否则使用位置实体的坐标
                 else if (police.isPositionDefined()) {
                     StandardEntity pos = this.worldInfo.getEntity(police.getPosition());
                     if (pos != null) {
@@ -136,24 +142,19 @@ public class PoliceBalancedClustering extends Clustering {
             }
         }
         
-        // 如果没有获取到任何警察位置，使用警察ID（兜底方案）
         if (allPolice.isEmpty()) {
             for (StandardEntity e : this.worldInfo.getEntitiesOfType(POLICE_FORCE)) {
                 allPolice.add(new PoliceWithLocation(e.getID(), 0, 0));
             }
         }
+        System.err.println("[警察均衡聚类] 收集到 " + allPolice.size() + " 个警察");
     }
     
-    /**
-     * 递归二分，直到得到 k 个簇
-     * 确保每个簇的道路数量大致相等
-     */
     private List<List<RoadWithLocation>> recursiveSplit(List<RoadWithLocation> points, int k) {
         List<List<RoadWithLocation>> result = new ArrayList<>();
         result.add(points);
         
         while (result.size() < k) {
-            // 找到当前最大的簇进行分裂
             int maxIdx = -1;
             int maxSize = -1;
             for (int i = 0; i < result.size(); i++) {
@@ -172,9 +173,6 @@ public class PoliceBalancedClustering extends Clustering {
         return result;
     }
     
-    /**
-     * 使用 KMeans 将点集分为 k 个簇（k=2）
-     */
     private List<List<RoadWithLocation>> kMeansSplit(List<RoadWithLocation> points, int k) {
         if (k <= 1 || points.size() <= 1) {
             List<List<RoadWithLocation>> result = new ArrayList<>();
@@ -185,7 +183,6 @@ public class PoliceBalancedClustering extends Clustering {
         Random random = new Random();
         List<RoadWithLocation> centers = new ArrayList<>();
         
-        // 智能选择初始中心：选择距离最远的两个点
         centers.add(points.get(random.nextInt(points.size())));
         RoadWithLocation farthest = findFarthestPoint(points, centers.get(0));
         centers.add(farthest);
@@ -197,10 +194,8 @@ public class PoliceBalancedClustering extends Clustering {
         int iteration = 0;
         do {
             changed = false;
-            // 清空簇
             for (int i = 0; i < k; i++) clusters.get(i).clear();
             
-            // 分配点到最近中心
             for (RoadWithLocation p : points) {
                 int nearest = 0;
                 double minDist = distSq(p, centers.get(0));
@@ -214,7 +209,6 @@ public class PoliceBalancedClustering extends Clustering {
                 clusters.get(nearest).add(p);
             }
             
-            // 更新中心
             for (int i = 0; i < k; i++) {
                 if (clusters.get(i).isEmpty()) continue;
                 double sumX = 0, sumY = 0;
@@ -237,9 +231,6 @@ public class PoliceBalancedClustering extends Clustering {
         return clusters;
     }
     
-    /**
-     * 找到离给定点最远的点
-     */
     private RoadWithLocation findFarthestPoint(List<RoadWithLocation> points, RoadWithLocation from) {
         RoadWithLocation farthest = points.get(0);
         double maxDist = 0;
@@ -253,9 +244,6 @@ public class PoliceBalancedClustering extends Clustering {
         return farthest;
     }
     
-    /**
-     * 计算每个簇的中心点
-     */
     private void computeClusterCenters(List<List<RoadWithLocation>> roadClusters) {
         for (int i = 0; i < roadClusters.size(); i++) {
             List<RoadWithLocation> cluster = roadClusters.get(i);
@@ -270,9 +258,6 @@ public class PoliceBalancedClustering extends Clustering {
         }
     }
     
-    /**
-     * 构建道路到簇的映射
-     */
     private void buildRoadMappings(List<List<RoadWithLocation>> roadClusters) {
         clusterEntityIDsList.clear();
         roadToClusterMap.clear();
@@ -289,20 +274,14 @@ public class PoliceBalancedClustering extends Clustering {
         }
     }
     
-    /**
-     * 将警察分配到最近的簇（基于初始位置）
-     * 确保每个簇至少分配一个警察
-     */
     private void assignPoliceToNearestCluster() {
         policeToClusterMap.clear();
         
-        // 如果没有警察位置信息，按警察ID顺序分配
         if (allPolice.isEmpty()) {
             assignPoliceByOrder();
             return;
         }
         
-        // 计算每个警察到各簇中心的距离
         List<PoliceAssignment> assignments = new ArrayList<>();
         for (PoliceWithLocation police : allPolice) {
             int nearestCluster = -1;
@@ -317,13 +296,10 @@ public class PoliceBalancedClustering extends Clustering {
             assignments.add(new PoliceAssignment(police.id, nearestCluster, minDist));
         }
         
-        // 按距离排序（距离近的先分配）
         assignments.sort(Comparator.comparingDouble(a -> a.distance));
         
-        // 记录每个簇已分配的警察数
         Map<Integer, Integer> clusterAssignCount = new HashMap<>();
         
-        // 第一轮：确保每个簇至少有一个警察
         Set<Integer> assignedClusters = new HashSet<>();
         for (PoliceAssignment assignment : assignments) {
             if (!assignedClusters.contains(assignment.clusterIndex)) {
@@ -334,7 +310,6 @@ public class PoliceBalancedClustering extends Clustering {
             }
         }
         
-        // 第二轮：分配剩余的警察（优先分配给警察少的簇）
         List<PoliceAssignment> remaining = new ArrayList<>();
         for (PoliceAssignment assignment : assignments) {
             if (!policeToClusterMap.containsKey(assignment.policeId)) {
@@ -342,7 +317,6 @@ public class PoliceBalancedClustering extends Clustering {
             }
         }
         
-        // 按距离排序，但优先考虑警察少的簇
         remaining.sort((a, b) -> {
             int countA = clusterAssignCount.getOrDefault(a.clusterIndex, 0);
             int countB = clusterAssignCount.getOrDefault(b.clusterIndex, 0);
@@ -357,11 +331,20 @@ public class PoliceBalancedClustering extends Clustering {
             clusterAssignCount.put(assignment.clusterIndex,
                 clusterAssignCount.getOrDefault(assignment.clusterIndex, 0) + 1);
         }
+        
+        System.err.println("[警察均衡聚类] 警察分配结果:");
+        for (Map.Entry<EntityID, Integer> entry : policeToClusterMap.entrySet()) {
+            int roadCount = clusterEntityIDsList.get(entry.getValue()).size();
+            System.err.printf("[警察均衡聚类]   警察 %d -> 簇 %d (道路数=%d)%n", 
+                entry.getKey().getValue(), entry.getValue(), roadCount);
+        }
+        
+        int maxPolicePerCluster = clusterAssignCount.values().stream().max(Integer::compareTo).orElse(0);
+        int minPolicePerCluster = clusterAssignCount.values().stream().min(Integer::compareTo).orElse(0);
+        System.err.printf("[警察均衡聚类] 警察分配均衡: 最小=%d, 最大=%d%n", 
+            minPolicePerCluster, maxPolicePerCluster);
     }
     
-    /**
-     * 回退方案：按警察ID顺序分配
-     */
     private void assignPoliceByOrder() {
         List<EntityID> policeIds = new ArrayList<>();
         for (StandardEntity e : this.worldInfo.getEntitiesOfType(POLICE_FORCE)) {
@@ -379,12 +362,10 @@ public class PoliceBalancedClustering extends Clustering {
         }
     }
     
-    /**
-     * 获取警察当前应负责的区域（考虑动态调整）
-     */
     public int getDynamicClusterIndex(EntityID policeId) {
         Integer staticIndex = policeToClusterMap.get(policeId);
-        return staticIndex != null ? staticIndex : -1;
+        if (staticIndex == null) return -1;
+        return staticIndex;
     }
     
     private double distSq(RoadWithLocation a, RoadWithLocation b) {
@@ -400,10 +381,17 @@ public class PoliceBalancedClustering extends Clustering {
             if (s < min) min = s;
             if (s > max) max = s;
         }
+        System.err.printf("[警察均衡聚类] 完成聚类，警察数量=%d, 总道路数=%d, 簇道路数范围: %d ~ %d%n",
+            clusterSize, allRoads.size(), min, max);
+    }
+    
+    public int getMinRoadCount() { return minRoadCount; }
+    public int getMaxRoadCount() { return maxRoadCount; }
+    public Map<Integer, Integer> getClusterRoadCount() { return new HashMap<>(clusterRoadCount); }
+    public boolean isLoadBalanced() {
+        return (maxRoadCount - minRoadCount) <= (allRoads.size() / clusterSize) * 0.5;
     }
 
-    // ==================== Clustering 接口实现 ====================
-    
     @Override
     public int getClusterNumber() {
         return clusterEntityIDsList.size();
@@ -416,11 +404,9 @@ public class PoliceBalancedClustering extends Clustering {
 
     @Override
     public int getClusterIndex(EntityID id) {
-        // 优先检查警察映射（用于警察自己查询）
         if (policeToClusterMap.containsKey(id)) {
             return policeToClusterMap.get(id);
         }
-        // 再检查道路映射
         Integer idx = roadToClusterMap.get(id);
         return idx != null ? idx : -1;
     }
@@ -448,8 +434,6 @@ public class PoliceBalancedClustering extends Clustering {
         return clusterEntityIDsList.get(index);
     }
 
-    // ==================== 生命周期方法 ====================
-    
     @Override
     public Clustering updateInfo(MessageManager messageManager) {
         return this;
@@ -470,8 +454,6 @@ public class PoliceBalancedClustering extends Clustering {
         return this;
     }
 
-    // ==================== 内部辅助类 ====================
-    
     private static class RoadWithLocation {
         EntityID id;
         double x, y;

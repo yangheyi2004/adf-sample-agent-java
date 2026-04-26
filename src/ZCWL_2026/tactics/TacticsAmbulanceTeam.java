@@ -44,6 +44,9 @@ public class TacticsAmbulanceTeam extends adf.core.component.tactics.TacticsAmbu
 
     private CommunicationMessage recentCommand;
     private Boolean isVisualDebug;
+    
+    // 添加：用于记录是否已发送过初始化状态
+    private boolean initializedStateSent = false;
 
     @Override
     public void initialize(AgentInfo agentInfo, WorldInfo worldInfo, ScenarioInfo scenarioInfo, 
@@ -150,6 +153,15 @@ public class TacticsAmbulanceTeam extends adf.core.component.tactics.TacticsAmbu
 
         AmbulanceTeam agent = (AmbulanceTeam) agentInfo.me();
         EntityID agentID = agentInfo.getID();
+        
+        // 添加：仿真开始时主动发送状态消息，让分配器知道救护车存在
+        if (!initializedStateSent) {
+            messageManager.addMessage(
+                new MessageAmbulanceTeam(true, agent, MessageAmbulanceTeam.ACTION_REST, agent.getPosition())
+            );
+            System.err.println("[救护车 " + agentID + "] 初始化完成，已发送状态消息");
+            initializedStateSent = true;
+        }
 
         for (CommunicationMessage message : messageManager.getReceivedMessageList(CommandScout.class)) {
             CommandScout command = (CommandScout) message;
@@ -194,6 +206,7 @@ public class TacticsAmbulanceTeam extends adf.core.component.tactics.TacticsAmbu
             return action;
         }
 
+        // 添加：即使没有任务，也要定期发送状态消息
         messageManager.addMessage(
                 new MessageAmbulanceTeam(true, agent, MessageAmbulanceTeam.ACTION_REST, agent.getPosition())
         );
@@ -228,4 +241,3 @@ public class TacticsAmbulanceTeam extends adf.core.component.tactics.TacticsAmbu
         }
     }
 }
-

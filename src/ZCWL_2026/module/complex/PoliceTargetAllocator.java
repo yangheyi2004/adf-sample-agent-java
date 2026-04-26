@@ -52,6 +52,7 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
     private Set<EntityID> criticalRoads;
 
     private Set<EntityID> knownVictimBuildings;
+    private Set<EntityID> exploredBuildings;
 
     private Map<EntityID, EntityID> policePositions;
     private Map<EntityID, PoliceTaskInfo> policeTaskInfoMap;
@@ -63,9 +64,12 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
     private int lastFullCleanupTime = 0;
     private static final int FULL_CLEANUP_INTERVAL = 5;
 
-    // ========== 新增：已完成道路缓存（防止世界模型延迟导致重复添加） ==========
-    private Map<EntityID, Integer> completedRoadCache; // 道路ID -> 完成时间
-    private static final int COMPLETED_CACHE_EXPIRE = 20; // 缓存有效期20步
+    private Map<EntityID, Integer> completedRoadCache;
+    private static final int COMPLETED_CACHE_EXPIRE = 20;
+    
+    private Map<Integer, Integer> clusterTaskCount;
+    private int lastLoadBalanceLogTime = 0;
+    private static final int LOAD_BALANCE_LOG_INTERVAL = 30;
 
     public PoliceTargetAllocator(AgentInfo ai, WorldInfo wi, ScenarioInfo si,
                                  ModuleManager mm, DevelopData dd) {
@@ -83,12 +87,14 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         this.rescuePriority = new HashMap<>();
         this.criticalRoads = new HashSet<>();
         this.knownVictimBuildings = new HashSet<>();
+        this.exploredBuildings = new HashSet<>();
         this.policePositions = new HashMap<>();
         this.policeTaskInfoMap = new HashMap<>();
         this.allocationResult = new HashMap<>();
         this.policeCurrentTask = new HashMap<>();
         this.policeTaskStartTime = new HashMap<>();
         this.completedRoadCache = new HashMap<>();
+        this.clusterTaskCount = new HashMap<>();
 
         switch (si.getMode()) {
             case PRECOMPUTATION_PHASE:
@@ -167,7 +173,6 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         this.currentTime = agentInfo.getTime();
         if (pathPlanning != null) pathPlanning.updateInfo(messageManager);
 
-        // 清理过期的已完成缓存
         completedRoadCache.entrySet().removeIf(entry -> currentTime - entry.getValue() > COMPLETED_CACHE_EXPIRE);
 
         policePositions.clear();
@@ -182,7 +187,6 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         processMessages();
         refreshRescueRoutesFromKnownVictims();
 
-        // 清理超时任务
         Iterator<Map.Entry<EntityID, Integer>> it = taskAssignTime.entrySet().iterator();
         while (it.hasNext()) {
             Map.Entry<EntityID, Integer> e = it.next();
@@ -196,7 +200,6 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
             }
         }
 
-        // 清理警察超时任务
         Iterator<Map.Entry<EntityID, Integer>> policeIt = policeTaskStartTime.entrySet().iterator();
         while (policeIt.hasNext()) {
             Map.Entry<EntityID, Integer> entry = policeIt.next();
@@ -208,7 +211,6 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
             }
         }
 
-        // 世界变化即时清理
         for (EntityID id : worldInfo.getChanged().getChangedEntities()) {
             StandardEntity e = worldInfo.getEntity(id);
             if (e instanceof Road) {
@@ -216,18 +218,50 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
                 if (r.isBlockadesDefined() && r.getBlockades().isEmpty()) {
                     removeTaskFromAllSources(id);
                     releasePoliceByRoad(id);
-                    completedRoadCache.put(id, currentTime); // 加入缓存
+                    completedRoadCache.put(id, currentTime);
                 }
             }
         }
 
-        // 定期全量清理
         if (currentTime - lastFullCleanupTime >= FULL_CLEANUP_INTERVAL) {
             lastFullCleanupTime = currentTime;
             performFullCleanup();
         }
+        
+        if (currentTime - lastLoadBalanceLogTime >= LOAD_BALANCE_LOG_INTERVAL) {
+            lastLoadBalanceLogTime = currentTime;
+            logLoadBalance();
+        }
 
         return this;
+    }
+    
+    private void logLoadBalance() {
+        if (policeClustering == null) return;
+        
+        Map<Integer, Integer> policeCountPerCluster = new HashMap<>();
+        for (EntityID policeId : policePositions.keySet()) {
+            int cluster = policeClustering.getClusterIndex(policeId);
+            if (cluster >= 0) {
+                policeCountPerCluster.put(cluster, policeCountPerCluster.getOrDefault(cluster, 0) + 1);
+            }
+        }
+        
+        Map<Integer, Integer> taskCountPerCluster = new HashMap<>();
+        for (RoadTask task : taskQueue) {
+            int cluster = policeClustering.getClusterIndex(task.roadId);
+            if (cluster >= 0) {
+                taskCountPerCluster.put(cluster, taskCountPerCluster.getOrDefault(cluster, 0) + 1);
+            }
+        }
+        
+        System.err.println("[警察分配器] 负载均衡: 簇\t警察数\t任务数");
+        for (int i = 0; i < policeCountPerCluster.size(); i++) {
+            System.err.printf("[警察分配器] 簇%d\t%d\t%d%n", 
+                i, 
+                policeCountPerCluster.getOrDefault(i, 0),
+                taskCountPerCluster.getOrDefault(i, 0));
+        }
     }
 
     private void performFullCleanup() {
@@ -302,28 +336,24 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
                 MessageRoad mr = (MessageRoad) msg;
                 if (mr.isPassable() != null && mr.isPassable()) {
                     EntityID roadId = mr.getRoadID();
-                    //System.err.println("[警察分配器] 时间=" + currentTime + " 收到道路清理消息: " + roadId);
                     removeTaskFromAllSources(roadId);
                     releasePoliceByRoad(roadId);
-                    completedRoadCache.put(roadId, currentTime); // 加入缓存
+                    completedRoadCache.put(roadId, currentTime);
                 }
             } else if (msg instanceof MessageReport) {
                 MessageReport report = (MessageReport) msg;
                 if (report.isDone()) {
                     EntityID policeId = report.getSenderID();
-                    //System.err.println("[警察分配器] 时间=" + currentTime + " 收到警察完成报告: 警察ID=" + policeId);
                     if (policeId != null) {
+                        // 修复：获取当前任务后立即清除所有相关记录
                         EntityID currentRoad = policeCurrentTask.get(policeId);
-                        //System.err.println("[警察分配器] 该警察当前记录的任务道路=" + currentRoad);
                         if (currentRoad != null) {
                             policeCurrentTask.remove(policeId);
                             policeTaskStartTime.remove(policeId);
                             policeTaskInfoMap.remove(policeId);
                             removeTaskFromAllSources(currentRoad);
-                            completedRoadCache.put(currentRoad, currentTime); // 加入缓存
-                            System.err.println("[警察分配器] 已移除道路任务: " + currentRoad);
-                        } else {
-                            //System.err.println("[警察分配器] 警告：警察 " + policeId + " 没有记录当前任务，无法清理");
+                            completedRoadCache.put(currentRoad, currentTime);
+                            System.err.println("[警察分配器] 警察 " + policeId + " 完成任务: " + currentRoad);
                         }
                     }
                 }
@@ -441,7 +471,6 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
     }
 
     private boolean needsClearing(EntityID roadId) {
-        // 优先检查缓存：如果在有效期内，视为已清理
         if (completedRoadCache.containsKey(roadId)) {
             return false;
         }
@@ -453,10 +482,6 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
     }
 
     private void removeTaskFromAllSources(EntityID roadId) {
-        int beforeUrgent = urgentRequests.size();
-        int beforeRescue = rescueRoutes.size();
-        int beforeCritical = criticalRoads.size();
-        
         boolean removed = false;
         if (urgentRequests.remove(roadId)) removed = true;
         if (rescueRoutes.remove(roadId)) removed = true;
@@ -466,14 +491,6 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         taskAssignTime.remove(roadId);
         taskCooldown.remove(roadId);
         taskQueue.removeIf(t -> t.roadId.equals(roadId));
-        
-        if (removed) {
-            /*System.err.printf("[警察分配器] 清理道路 %s: 紧急=%d→%d, 救援=%d→%d, 关键=%d→%d%n",
-                    roadId,
-                    beforeUrgent, urgentRequests.size(),
-                    beforeRescue, rescueRoutes.size(),
-                    beforeCritical, criticalRoads.size());*/
-        }
     }
 
     private void rebuildTaskQueue() {
@@ -512,7 +529,7 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
             }
             addTask(r, PRIORITY_CRITICAL);
         }
-        System.err.printf("[分配器] 时间=%d 队列: 救援=%d 紧急=%d 关键=%d%n",
+        System.err.printf("[警察分配器] 时间=%d 队列: 救援=%d 紧急=%d 关键=%d%n",
                 currentTime, rescueRoutes.size(), urgentRequests.size(), criticalRoads.size());
     }
 

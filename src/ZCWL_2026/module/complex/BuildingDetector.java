@@ -22,11 +22,18 @@ public class BuildingDetector extends adf.core.component.module.complex.Building
     private Clustering clustering;
     private Set<EntityID> checkedBuildings;
     private MessageManager messageManager;
+    
+    // 问题10修复：增加火情缓存
+    private Set<EntityID> reportedFireBuildings;
+    private int lastFireCheckTime;
+    private static final int FIRE_REPORT_INTERVAL = 5;
 
     public BuildingDetector(AgentInfo ai, WorldInfo wi, ScenarioInfo si,
                             ModuleManager moduleManager, DevelopData developData) {
         super(ai, wi, si, moduleManager, developData);
         this.checkedBuildings = new HashSet<>();
+        this.reportedFireBuildings = new HashSet<>();
+        this.lastFireCheckTime = 0;
         
         System.err.println("[ZCWL_2026] 消防车 ID:" + ai.getID() + " 建筑检测器已加载");
         
@@ -52,7 +59,12 @@ public class BuildingDetector extends adf.core.component.module.complex.Building
 
     @Override
     public BuildingDetector calc() {
-        this.result = this.calcTargetInCluster();
+        // 问题10修复：优先检测着火建筑
+        this.result = findFireBuildingFirst();
+        
+        if (this.result == null) {
+            this.result = this.calcTargetInCluster();
+        }
         if (this.result == null) {
             this.result = this.calcTargetInWorld();
         }
@@ -68,17 +80,73 @@ public class BuildingDetector extends adf.core.component.module.complex.Building
                 this.messageManager.addMessage(msg);
                 
                 if (building.isOnFire()) {
-                    System.err.println("[ZCWL_2026] 消防车 ID:" + this.agentInfo.getID() + 
-                                       " 发现着火建筑: " + this.result + 
-                                       ", 火势: " + building.getFieryness());
+                    // 问题10修复：记录并输出火情信息
+                    if (!reportedFireBuildings.contains(this.result)) {
+                        System.err.println("[ZCWL_2026] 消防车 ID:" + this.agentInfo.getID() + 
+                                           " 🔥 发现着火建筑: " + this.result + 
+                                           ", 火势等级: " + building.getFieryness());
+                        reportedFireBuildings.add(this.result);
+                    }
                 } else {
-                    System.err.println("[ZCWL_2026] 消防车 ID:" + this.agentInfo.getID() + 
-                                       " 检查建筑: " + this.result);
+                    // System.err.println("[ZCWL_2026] 消防车 ID:" + this.agentInfo.getID() + 
+                    //                    " 检查建筑: " + this.result);
                 }
             }
         }
         
+        // 问题10修复：定期重新检查已报告的火情建筑（火势可能变化）
+        int currentTime = this.agentInfo.getTime();
+        if (currentTime - lastFireCheckTime > FIRE_REPORT_INTERVAL) {
+            lastFireCheckTime = currentTime;
+            recheckFireBuildings();
+        }
+        
         return this;
+    }
+    
+    // 问题10修复：优先查找着火建筑
+    private EntityID findFireBuildingFirst() {
+        // 先在自己簇内找着火建筑
+        if (this.clustering != null) {
+            int clusterIndex = this.clustering.getClusterIndex(this.agentInfo.getID());
+            Collection<StandardEntity> elements = this.clustering.getClusterEntities(clusterIndex);
+            if (elements != null && !elements.isEmpty()) {
+                for (StandardEntity entity : elements) {
+                    if (entity instanceof Building) {
+                        Building b = (Building) entity;
+                        if (b.isOnFire() && !this.checkedBuildings.contains(entity.getID())) {
+                            return entity.getID();
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 全局查找着火建筑
+        for (StandardEntity entity : this.worldInfo.getEntitiesOfType(BUILDING, GAS_STATION)) {
+            Building b = (Building) entity;
+            if (b.isOnFire() && !this.checkedBuildings.contains(entity.getID())) {
+                return entity.getID();
+            }
+        }
+        
+        return null;
+    }
+    
+    // 问题10修复：重新检查已报告的火情建筑
+    private void recheckFireBuildings() {
+        Set<EntityID> toRemove = new HashSet<>();
+        for (EntityID buildingId : reportedFireBuildings) {
+            Building b = (Building) this.worldInfo.getEntity(buildingId);
+            if (b == null || !b.isOnFire()) {
+                toRemove.add(buildingId);
+            } else if (this.messageManager != null) {
+                // 火势还在，继续报告
+                MessageBuilding msg = new MessageBuilding(true, b);
+                this.messageManager.addMessage(msg);
+            }
+        }
+        reportedFireBuildings.removeAll(toRemove);
     }
 
     private EntityID calcTargetInCluster() {
