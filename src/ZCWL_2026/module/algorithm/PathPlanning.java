@@ -24,7 +24,7 @@ public class PathPlanning extends adf.core.component.module.algorithm.PathPlanni
     private List<EntityID> result;
 
     // ========== BFS 深度限制 ==========
-    private static final int MAX_SEARCH_DEPTH = 5000;
+    private static final int MAX_SEARCH_DEPTH = 4000;
 
     // ========== 缓存相关字段 ==========
     private static class CacheKey {

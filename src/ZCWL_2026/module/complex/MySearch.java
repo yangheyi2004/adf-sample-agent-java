@@ -115,11 +115,11 @@ public class MySearch extends Search {
                     }
                 }
             } catch (Exception e) {
-                System.err.println("[MySearch] 聚类获取失败: " + e.getMessage());
+                //System.err.println("[MySearch] 聚类获取失败: " + e.getMessage());
             }
         }
         this.zoneTotalCount = 0;
-        System.err.println("[MySearch] 无法获取本区域建筑，将直接使用全局探索");
+        //System.err.println("[MySearch] 无法获取本区域建筑，将直接使用全局探索");
     }
     
     private void updateZoneProgress() {
@@ -130,10 +130,10 @@ public class MySearch extends Search {
         }
         if (zoneUnsearched.isEmpty() && zoneTotalCount > 0 && !zoneCompleted) {
             zoneCompleted = true;
-            System.err.println("╔══════════════════════════════════════════════════════════════╗");
-            System.err.println("║  [MySearch] 本区域探索完成！共探索 " + zoneTotalCount + " 个建筑       ║");
-            System.err.println("║  切换到全局探索模式                                          ║");
-            System.err.println("╚══════════════════════════════════════════════════════════════╝");
+            //System.err.println("╔══════════════════════════════════════════════════════════════╗");
+            //System.err.println("║  [MySearch] 本区域探索完成！共探索 " + zoneTotalCount + " 个建筑       ║");
+            //System.err.println("║  切换到全局探索模式                                          ║");
+            //System.err.println("╚══════════════════════════════════════════════════════════════╝");
         }
     }
     
@@ -155,7 +155,7 @@ public class MySearch extends Search {
                 BUILDING, GAS_STATION, AMBULANCE_CENTRE, FIRE_STATION, POLICE_OFFICE)) {
             this.unsearchedBuildings.add(entity.getID());
         }
-        System.err.println("[MySearch] 全图建筑总数: " + this.unsearchedBuildings.size());
+        //System.err.println("[MySearch] 全图建筑总数: " + this.unsearchedBuildings.size());
     }
     
     private void initialize() {
@@ -242,8 +242,8 @@ public class MySearch extends Search {
             if (!zoneCompleted && zoneTotalCount > 0) {
                 int remaining = zoneUnsearched.size();
                 int explored = zoneTotalCount - remaining;
-                System.err.println("[MySearch] " + agentName + " 区域探索: " + 
-                                   explored + "/" + zoneTotalCount + "，剩余=" + remaining);
+                //System.err.println("[MySearch] " + agentName + " 区域探索: " + 
+                                   //explored + "/" + zoneTotalCount + "，剩余=" + remaining);
             }
         }
         return this;

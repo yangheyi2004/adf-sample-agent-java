@@ -1,6 +1,7 @@
 package ZCWL_2026.module.complex;
 
 import adf.core.agent.communication.MessageManager;
+import adf.core.agent.communication.standard.bundle.centralized.CommandFire;
 import adf.core.agent.communication.standard.bundle.centralized.MessageReport;
 import adf.core.agent.communication.standard.bundle.information.*;
 import adf.core.agent.develop.DevelopData;
@@ -20,8 +21,8 @@ import static rescuecore2.standard.entities.StandardEntityURN.*;
 
 public class PoliceTargetAllocator extends adf.core.component.module.complex.PoliceTargetAllocator {
 
-    private static final int PRIORITY_FORCED_RESCUE = -1;
-    private static final int PRIORITY_URGENT = 0;
+    // 优先级常量（数值越小优先级越高）
+    private static final int PRIORITY_FORCED_RESCUE = 0;
     private static final int PRIORITY_RESCUE = 1;
     private static final int PRIORITY_RESCUE_UNDEFINED = 2;
     private static final int PRIORITY_CRITICAL = 3;
@@ -46,13 +47,11 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
     private Map<EntityID, Integer> taskCooldown;
     private Map<EntityID, Integer> taskAssignTime;
 
-    private Set<EntityID> urgentRequests;
     private Set<EntityID> rescueRoutes;
     private Map<EntityID, Integer> rescuePriority;
     private Set<EntityID> criticalRoads;
 
     private Set<EntityID> knownVictimBuildings;
-    private Set<EntityID> exploredBuildings;
 
     private Map<EntityID, EntityID> policePositions;
     private Map<EntityID, PoliceTaskInfo> policeTaskInfoMap;
@@ -82,12 +81,10 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         this.taskAssignCount = new HashMap<>();
         this.taskCooldown = new HashMap<>();
         this.taskAssignTime = new HashMap<>();
-        this.urgentRequests = new HashSet<>();
         this.rescueRoutes = new HashSet<>();
         this.rescuePriority = new HashMap<>();
         this.criticalRoads = new HashSet<>();
         this.knownVictimBuildings = new HashSet<>();
-        this.exploredBuildings = new HashSet<>();
         this.policePositions = new HashMap<>();
         this.policeTaskInfoMap = new HashMap<>();
         this.allocationResult = new HashMap<>();
@@ -111,7 +108,6 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         
         this.maxSearchDepth = determineSearchDepth();
         initCriticalRoads();
-        System.err.println("[警察分配器] 搜索深度设置为: " + this.maxSearchDepth);
     }
 
     private int determineSearchDepth() {
@@ -126,6 +122,7 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         return (!hasFireStation && !hasAmbulanceCentre) ? NO_CENTER_SEARCH_DEPTH : DEFAULT_SEARCH_DEPTH;
     }
 
+    // 修复：不再因为道路畅通而中断传播，使得深度内的所有阻塞道路都能被发现
     private void initCriticalRoads() {
         Set<EntityID> importantBuildings = new HashSet<>();
         for (StandardEntity e : worldInfo.getEntitiesOfType(REFUGE, FIRE_STATION, POLICE_OFFICE, AMBULANCE_CENTRE)) {
@@ -154,11 +151,12 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
                 boolean undefined = !blocked && !isRoadDefined(roadId);
                 if (blocked || undefined) {
                     criticalRoads.add(roadId);
-                    for (EntityID neighborId : road.getNeighbours()) {
-                        if (worldInfo.getEntity(neighborId) instanceof Road && !visited.contains(neighborId)) {
-                            visited.add(neighborId);
-                            queue.add(neighborId);
-                        }
+                }
+                // 修复：无论道路是否阻塞，都继续向邻居传播，以发现更深层的阻塞道路
+                for (EntityID neighborId : road.getNeighbours()) {
+                    if (worldInfo.getEntity(neighborId) instanceof Road && !visited.contains(neighborId)) {
+                        visited.add(neighborId);
+                        queue.add(neighborId);
                     }
                 }
             }
@@ -226,6 +224,7 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         if (currentTime - lastFullCleanupTime >= FULL_CLEANUP_INTERVAL) {
             lastFullCleanupTime = currentTime;
             performFullCleanup();
+            refreshCriticalRoads();  // 修复：定期重新扫描关键道路，捕获新出现的阻塞
         }
         
         if (currentTime - lastLoadBalanceLogTime >= LOAD_BALANCE_LOG_INTERVAL) {
@@ -254,27 +253,17 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
                 taskCountPerCluster.put(cluster, taskCountPerCluster.getOrDefault(cluster, 0) + 1);
             }
         }
-        
-        System.err.println("[警察分配器] 负载均衡: 簇\t警察数\t任务数");
-        for (int i = 0; i < policeCountPerCluster.size(); i++) {
-            System.err.printf("[警察分配器] 簇%d\t%d\t%d%n", 
-                i, 
-                policeCountPerCluster.getOrDefault(i, 0),
-                taskCountPerCluster.getOrDefault(i, 0));
-        }
+    }
+
+    // 修复：定期重建关键道路列表，以应对仿真中新出现的阻塞
+    private void refreshCriticalRoads() {
+        criticalRoads.clear();
+        initCriticalRoads();
     }
 
     private void performFullCleanup() {
         List<EntityID> toRemove = new ArrayList<>();
         for (EntityID roadId : rescueRoutes) {
-            if (!needsClearing(roadId)) toRemove.add(roadId);
-        }
-        for (EntityID roadId : toRemove) {
-            removeTaskFromAllSources(roadId);
-            completedRoadCache.put(roadId, currentTime);
-        }
-        toRemove.clear();
-        for (EntityID roadId : urgentRequests) {
             if (!needsClearing(roadId)) toRemove.add(roadId);
         }
         for (EntityID roadId : toRemove) {
@@ -306,19 +295,27 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
 
     private void processMessages() {
         for (CommunicationMessage msg : msgManager.getReceivedMessageList()) {
+            if (msg instanceof CommandFire) {
+                CommandFire cmd = (CommandFire) msg;
+                if (cmd.getAction() == CommandFire.ACTION_RESCUE ||
+                    cmd.getAction() == CommandFire.ACTION_EXTINGUISH) {
+                    if (cmd.getTargetID() != null) {
+                        addAgentTargetToRescue(cmd.getTargetID());
+                    }
+                }
+                continue;
+            }
+
             if (msg instanceof MessageFireBrigade) {
                 MessageFireBrigade mfb = (MessageFireBrigade) msg;
-                if (mfb.getAction() == MessageFireBrigade.ACTION_MOVE && mfb.getTargetID() != null) {
-                    handleMoveRequest(mfb.getAgentID(), mfb.getTargetID());
+                if (mfb.getAction() == MessageFireBrigade.ACTION_EXTINGUISH && mfb.getTargetID() != null) {
+                    addAgentTargetToRescue(mfb.getTargetID());
                 }
                 if (mfb.isBuriednessDefined() && mfb.getBuriedness() > 0 && mfb.isPositionDefined()) {
                     knownVictimBuildings.add(mfb.getPosition());
                 }
             } else if (msg instanceof MessageAmbulanceTeam) {
                 MessageAmbulanceTeam mat = (MessageAmbulanceTeam) msg;
-                if (mat.getAction() == MessageAmbulanceTeam.ACTION_MOVE && mat.getTargetID() != null) {
-                    handleMoveRequest(mat.getAgentID(), mat.getTargetID());
-                }
                 if (mat.isBuriednessDefined() && mat.getBuriedness() > 0 && mat.isPositionDefined()) {
                     knownVictimBuildings.add(mat.getPosition());
                 }
@@ -345,7 +342,6 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
                 if (report.isDone()) {
                     EntityID policeId = report.getSenderID();
                     if (policeId != null) {
-                        // 修复：获取当前任务后立即清除所有相关记录
                         EntityID currentRoad = policeCurrentTask.get(policeId);
                         if (currentRoad != null) {
                             policeCurrentTask.remove(policeId);
@@ -353,7 +349,6 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
                             policeTaskInfoMap.remove(policeId);
                             removeTaskFromAllSources(currentRoad);
                             completedRoadCache.put(currentRoad, currentTime);
-                            System.err.println("[警察分配器] 警察 " + policeId + " 完成任务: " + currentRoad);
                         }
                     }
                 }
@@ -361,30 +356,41 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         }
     }
 
-    private void handleMoveRequest(EntityID agentId, EntityID targetId) {
-        StandardEntity agentEntity = worldInfo.getEntity(agentId);
-        if (!(agentEntity instanceof Human)) return;
-        Human human = (Human) agentEntity;
-        if (!human.isPositionDefined()) return;
-        EntityID from = human.getPosition();
-        EntityID to = targetId;
+    private void addAgentTargetToRescue(EntityID targetId) {
+        StandardEntity targetEntity = worldInfo.getEntity(targetId);
+        if (targetEntity == null) return;
 
-        List<EntityID> path = (pathPlanning != null) ? pathPlanning.getResult(from, to) : null;
-        if (path == null || path.isEmpty()) {
-            if (worldInfo.getEntity(to) instanceof Road && needsClearing(to) && !taskCooldown.containsKey(to)) {
-                urgentRequests.add(to);
-                taskCooldown.put(to, TASK_COOLDOWN);
+        if (targetEntity instanceof Road) {
+            if (needsClearing(targetId) && !taskCooldown.containsKey(targetId)) {
+                addOrPromoteRescueRoad(targetId, PRIORITY_FORCED_RESCUE);
+                taskCooldown.put(targetId, TASK_COOLDOWN);
             }
             return;
         }
 
-        for (EntityID step : path) {
-            if (!(worldInfo.getEntity(step) instanceof Road)) continue;
-            if (needsClearing(step) && !taskCooldown.containsKey(step)) {
-                urgentRequests.add(step);
-                taskCooldown.put(step, TASK_COOLDOWN);
-                break;
+        if (targetEntity instanceof Building) {
+            Building building = (Building) targetEntity;
+            for (EntityID neighborId : building.getNeighbours()) {
+                StandardEntity neighbor = worldInfo.getEntity(neighborId);
+                if (neighbor instanceof Road) {
+                    if (needsClearing(neighborId) && !taskCooldown.containsKey(neighborId)) {
+                        addOrPromoteRescueRoad(neighborId, PRIORITY_FORCED_RESCUE);
+                        taskCooldown.put(neighborId, TASK_COOLDOWN);
+                    }
+                }
             }
+        }
+    }
+
+    private void addOrPromoteRescueRoad(EntityID roadId, int newPriority) {
+        if (rescueRoutes.contains(roadId)) {
+            int oldPriority = rescuePriority.getOrDefault(roadId, PRIORITY_CRITICAL);
+            if (newPriority < oldPriority) {
+                rescuePriority.put(roadId, newPriority);
+            }
+        } else {
+            rescueRoutes.add(roadId);
+            rescuePriority.put(roadId, newPriority);
         }
     }
 
@@ -396,6 +402,7 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         }
     }
 
+    // 修复：同样无条件传播，使深层的阻塞道路不被遗漏
     private void addRescueRoutesFromBuilding(EntityID building) {
         StandardEntity entity = worldInfo.getEntity(building);
         if (!(entity instanceof Building)) return;
@@ -421,22 +428,23 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
                 boolean undefined = !blocked && !isRoadDefined(roadId);
                 if (blocked || undefined) {
                     foundAny = true;
-                    if (rescueRoutes.add(roadId)) {
-                        int prio = blocked ? PRIORITY_RESCUE : PRIORITY_RESCUE_UNDEFINED;
-                        rescuePriority.put(roadId, prio);
+                    if (!rescueRoutes.contains(roadId)) {
+                        rescueRoutes.add(roadId);
+                        rescuePriority.put(roadId, blocked ? PRIORITY_RESCUE : PRIORITY_RESCUE_UNDEFINED);
                     }
-                    for (EntityID neighborId : road.getNeighbours()) {
-                        if (worldInfo.getEntity(neighborId) instanceof Road && !visited.contains(neighborId)) {
-                            visited.add(neighborId);
-                            queue.add(neighborId);
-                        }
+                }
+                // 修复：无论是否阻塞，都继续向邻居传播
+                for (EntityID neighborId : road.getNeighbours()) {
+                    if (worldInfo.getEntity(neighborId) instanceof Road && !visited.contains(neighborId)) {
+                        visited.add(neighborId);
+                        queue.add(neighborId);
                     }
                 }
             }
         }
         if (!foundAny && pathPlanning != null) {
             EntityID nearestRoad = findNearestRoadFromBuilding(building);
-            if (nearestRoad != null) {
+            if (nearestRoad != null && !rescueRoutes.contains(nearestRoad)) {
                 rescueRoutes.add(nearestRoad);
                 rescuePriority.put(nearestRoad, PRIORITY_FORCED_RESCUE);
             }
@@ -482,11 +490,9 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
     }
 
     private void removeTaskFromAllSources(EntityID roadId) {
-        boolean removed = false;
-        if (urgentRequests.remove(roadId)) removed = true;
-        if (rescueRoutes.remove(roadId)) removed = true;
+        rescueRoutes.remove(roadId);
         rescuePriority.remove(roadId);
-        if (criticalRoads.remove(roadId)) removed = true;
+        criticalRoads.remove(roadId);
         taskAssignCount.remove(roadId);
         taskAssignTime.remove(roadId);
         taskCooldown.remove(roadId);
@@ -504,23 +510,12 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         taskQueue.clear();
         for (EntityID r : new HashSet<>(rescueRoutes)) {
             int prio = rescuePriority.getOrDefault(r, PRIORITY_RESCUE);
-            if (prio == PRIORITY_FORCED_RESCUE) {
-                addTask(r, PRIORITY_FORCED_RESCUE);
-            } else {
-                if (!needsClearing(r)) {
-                    rescueRoutes.remove(r);
-                    rescuePriority.remove(r);
-                    continue;
-                }
-                addTask(r, prio);
-            }
-        }
-        for (EntityID r : new HashSet<>(urgentRequests)) {
             if (!needsClearing(r)) {
-                urgentRequests.remove(r);
+                rescueRoutes.remove(r);
+                rescuePriority.remove(r);
                 continue;
             }
-            addTask(r, PRIORITY_URGENT);
+            addTask(r, prio);
         }
         for (EntityID r : new HashSet<>(criticalRoads)) {
             if (!needsClearing(r)) {
@@ -529,8 +524,6 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
             }
             addTask(r, PRIORITY_CRITICAL);
         }
-        System.err.printf("[警察分配器] 时间=%d 队列: 救援=%d 紧急=%d 关键=%d%n",
-                currentTime, rescueRoutes.size(), urgentRequests.size(), criticalRoads.size());
     }
 
     private void addTask(EntityID roadId, int priority) {
@@ -572,23 +565,14 @@ public class PoliceTargetAllocator extends adf.core.component.module.complex.Pol
         for (RoadTask task : tasks) {
             boolean isRescueTask = (task.priority == PRIORITY_FORCED_RESCUE || task.priority == PRIORITY_RESCUE || task.priority == PRIORITY_RESCUE_UNDEFINED);
             if (!isRescueTask) continue;
-            int maxPolice = MAX_POLICE_PER_RESCUE_TASK;
-            if (taskAssignCount.getOrDefault(task.roadId, 0) >= maxPolice) continue;
+            if (taskAssignCount.getOrDefault(task.roadId, 0) >= MAX_POLICE_PER_RESCUE_TASK) continue;
             EntityID bestPolice = findBestIdlePoliceForTask(task, availablePolice, assignedThisRound);
             if (bestPolice != null) {
                 assignTask(bestPolice, task);
                 assignedThisRound.add(bestPolice);
             }
         }
-        for (RoadTask task : tasks) {
-            if (task.priority != PRIORITY_URGENT) continue;
-            if (taskAssignCount.getOrDefault(task.roadId, 0) >= MAX_POLICE_PER_TASK) continue;
-            EntityID bestPolice = findBestIdlePoliceForTask(task, availablePolice, assignedThisRound);
-            if (bestPolice != null) {
-                assignTask(bestPolice, task);
-                assignedThisRound.add(bestPolice);
-            }
-        }
+
         for (RoadTask task : tasks) {
             if (task.priority != PRIORITY_CRITICAL) continue;
             if (taskAssignCount.getOrDefault(task.roadId, 0) >= MAX_POLICE_PER_TASK) continue;

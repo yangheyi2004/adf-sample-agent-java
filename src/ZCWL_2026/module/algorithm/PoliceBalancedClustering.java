@@ -49,7 +49,7 @@ public class PoliceBalancedClustering extends Clustering {
         this.clusterRoadCount = new HashMap<>();
         this.isInitialized = false;
         
-        System.err.println("[警察均衡聚类] 初始化，警察数量=" + clusterSize);
+        //System.err.println("[警察均衡聚类] 初始化，警察数量=" + clusterSize);
     }
 
     @Override
@@ -60,12 +60,12 @@ public class PoliceBalancedClustering extends Clustering {
         collectPolice();
         
         if (allRoads.isEmpty()) {
-            System.err.println("[警察均衡聚类] 未找到任何道路，聚类终止");
+            //System.err.println("[警察均衡聚类] 未找到任何道路，聚类终止");
             return this;
         }
         
         if (allPolice.isEmpty()) {
-            System.err.println("[警察均衡聚类] 未找到任何警察，聚类终止");
+            //System.err.println("[警察均衡聚类] 未找到任何警察，聚类终止");
             return this;
         }
         
@@ -99,13 +99,13 @@ public class PoliceBalancedClustering extends Clustering {
             .average()
             .orElse(0);
         
-        System.err.printf("[警察均衡聚类] 负载均衡: 总道路=%d, 簇数=%d, 平均=%.1f, 最小=%d, 最大=%d%n",
-            allRoads.size(), clusterEntityIDsList.size(), avgRoadCount, minRoadCount, maxRoadCount);
+        //System.err.printf("[警察均衡聚类] 负载均衡: 总道路=%d, 簇数=%d, 平均=%.1f, 最小=%d, 最大=%d%n",
+           // allRoads.size(), clusterEntityIDsList.size(), avgRoadCount, minRoadCount, maxRoadCount);
         
-        for (int i = 0; i < clusterEntityIDsList.size(); i++) {
-            System.err.printf("[警察均衡聚类] 簇%d: 道路数=%d%n", 
-                i, clusterEntityIDsList.get(i).size());
-        }
+        //for (int i = 0; i < clusterEntityIDsList.size(); i++) {
+           // System.err.printf("[警察均衡聚类] 簇%d: 道路数=%d%n", 
+               // i, clusterEntityIDsList.get(i).size());
+       // }
     }
     
     private void collectRoads() {
@@ -118,7 +118,7 @@ public class PoliceBalancedClustering extends Clustering {
                 }
             }
         }
-        System.err.println("[警察均衡聚类] 收集到 " + allRoads.size() + " 条道路");
+        //System.err.println("[警察均衡聚类] 收集到 " + allRoads.size() + " 条道路");
     }
     
     private void collectPolice() {
@@ -147,7 +147,7 @@ public class PoliceBalancedClustering extends Clustering {
                 allPolice.add(new PoliceWithLocation(e.getID(), 0, 0));
             }
         }
-        System.err.println("[警察均衡聚类] 收集到 " + allPolice.size() + " 个警察");
+        //System.err.println("[警察均衡聚类] 收集到 " + allPolice.size() + " 个警察");
     }
     
     private List<List<RoadWithLocation>> recursiveSplit(List<RoadWithLocation> points, int k) {
@@ -332,17 +332,17 @@ public class PoliceBalancedClustering extends Clustering {
                 clusterAssignCount.getOrDefault(assignment.clusterIndex, 0) + 1);
         }
         
-        System.err.println("[警察均衡聚类] 警察分配结果:");
+        //System.err.println("[警察均衡聚类] 警察分配结果:");
         for (Map.Entry<EntityID, Integer> entry : policeToClusterMap.entrySet()) {
             int roadCount = clusterEntityIDsList.get(entry.getValue()).size();
-            System.err.printf("[警察均衡聚类]   警察 %d -> 簇 %d (道路数=%d)%n", 
-                entry.getKey().getValue(), entry.getValue(), roadCount);
+           // System.err.printf("[警察均衡聚类]   警察 %d -> 簇 %d (道路数=%d)%n", 
+               // entry.getKey().getValue(), entry.getValue(), roadCount);
         }
         
         int maxPolicePerCluster = clusterAssignCount.values().stream().max(Integer::compareTo).orElse(0);
         int minPolicePerCluster = clusterAssignCount.values().stream().min(Integer::compareTo).orElse(0);
-        System.err.printf("[警察均衡聚类] 警察分配均衡: 最小=%d, 最大=%d%n", 
-            minPolicePerCluster, maxPolicePerCluster);
+        //System.err.printf("[警察均衡聚类] 警察分配均衡: 最小=%d, 最大=%d%n", 
+           // minPolicePerCluster, maxPolicePerCluster);
     }
     
     private void assignPoliceByOrder() {
@@ -381,8 +381,8 @@ public class PoliceBalancedClustering extends Clustering {
             if (s < min) min = s;
             if (s > max) max = s;
         }
-        System.err.printf("[警察均衡聚类] 完成聚类，警察数量=%d, 总道路数=%d, 簇道路数范围: %d ~ %d%n",
-            clusterSize, allRoads.size(), min, max);
+       // System.err.printf("[警察均衡聚类] 完成聚类，警察数量=%d, 总道路数=%d, 簇道路数范围: %d ~ %d%n",
+           // clusterSize, allRoads.size(), min, max);
     }
     
     public int getMinRoadCount() { return minRoadCount; }

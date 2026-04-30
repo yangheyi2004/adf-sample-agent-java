@@ -90,7 +90,7 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
             registerModule(this.pathPlanning);
         }
         
-        System.err.println("[消防分配器] 已加载 - 最大分配比例: " + (int)(MAX_ALLOCATION_RATIO * 100) + "%");
+       // System.err.println("[消防分配器] 已加载 - 最大分配比例: " + (int)(MAX_ALLOCATION_RATIO * 100) + "%");
     }
 
     @Override
@@ -166,7 +166,7 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
         for (EntityID id : this.worldInfo.getEntityIDsOfType(FIRE_BRIGADE)) {
             firemanMap.put(id, new FireInfo(id));
         }
-        System.err.println("[消防分配器] 初始化完成，消防员数量: " + firemanMap.size());
+        //System.err.println("[消防分配器] 初始化完成，消防员数量: " + firemanMap.size());
     }
 
     private void scanWorldForBuriedVictims() {
@@ -197,7 +197,7 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
         }
         
         if (found > 0) {
-            System.err.println("[消防分配器] 🔍 主动扫描发现 " + found + " 个被掩埋单位");
+           // System.err.println("[消防分配器] 🔍 主动扫描发现 " + found + " 个被掩埋单位");
         }
     }
 
@@ -439,8 +439,8 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
         if (actualAssignLimit == 0 || taskQueue.isEmpty()) {
             int rescueCount = rescueRequestTargets.size();
             int fireCount = fireTargets.size();
-            System.err.printf("[消防分配器] 时间=%d 队列: 救援=%d 灭火=%d 已分配消防车=%d%n",
-                    this.agentInfo.getTime(), rescueCount, fireCount, assignedFiremanTasks.size());
+           // System.err.printf("[消防分配器] 时间=%d 队列: 救援=%d 灭火=%d 已分配消防车=%d%n",
+                    //this.agentInfo.getTime(), rescueCount, fireCount, assignedFiremanTasks.size());
             return;
         }
         
@@ -507,9 +507,9 @@ public class FireTargetAllocator extends adf.core.component.module.complex.FireT
             return !(e instanceof Building) || !((Building) e).isOnFire();
         });
         
-        System.err.printf("[消防分配器] 时间=%d 队列: 救援=%d 灭火=%d 已分配消防车=%d (本轮: 救援=%d, 灭火=%d)%n",
-                this.agentInfo.getTime(), rescueRequestTargets.size(), fireTargets.size(), 
-                assignedFiremanTasks.size(), rescueAssigned, fireAssigned);
+        //System.err.printf("[消防分配器] 时间=%d 队列: 救援=%d 灭火=%d 已分配消防车=%d (本轮: 救援=%d, 灭火=%d)%n",
+        //        this.agentInfo.getTime(), rescueRequestTargets.size(), fireTargets.size(), 
+        //        assignedFiremanTasks.size(), rescueAssigned, fireAssigned);
     }
 
     private void assignTaskToFireman(EntityID firemanId, EntityID task, int priority) {

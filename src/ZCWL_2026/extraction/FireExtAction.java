@@ -9,7 +9,6 @@ import adf.core.agent.action.ambulance.ActionRescue;
 import adf.core.agent.communication.MessageManager;
 import adf.core.agent.communication.standard.bundle.information.MessageCivilian;
 import adf.core.agent.communication.standard.bundle.information.MessageFireBrigade;
-import adf.core.agent.communication.standard.bundle.information.MessageRoad;
 import adf.core.agent.develop.DevelopData;
 import adf.core.agent.info.AgentInfo;
 import adf.core.agent.info.ScenarioInfo;
@@ -28,7 +27,6 @@ import static rescuecore2.standard.entities.StandardEntityURN.*;
 
 public class FireExtAction extends ExtAction {
 
-    // ==================== 配置参数 ====================
     private int maxExtinguishDistance;
     private int maxExtinguishPower;
     private int thresholdRest;
@@ -42,7 +40,6 @@ public class FireExtAction extends ExtAction {
     private MessageManager msgManager;
     private Set<EntityID> reportedVictims;
     
-    // ========== 防卡死参数 ==========
     private static final int MAX_STUCK_COUNT = 30;
     private static final int MAX_NO_PROGRESS = 20;
     private EntityID lastPosition;
@@ -50,15 +47,8 @@ public class FireExtAction extends ExtAction {
     private EntityID lastTarget;
     private int noProgressCounter;
 
-    // ========== 救援完成检测 ==========
     private EntityID previousTarget;
     private boolean wasBuriedLastCheck;
-
-    // ========== 新增：视觉上报道路状态 ==========
-    private Set<EntityID> reportedRoads = new HashSet<>();
-    // ========== 新增：冷却计时器 ==========
-    private Map<EntityID, Integer> roadReportCooldown = new HashMap<>();
-    private static final int REPORT_COOLDOWN = 20; // 同一路段至少20步内不重复上报
 
     public FireExtAction(AgentInfo agentInfo, WorldInfo worldInfo, ScenarioInfo scenarioInfo,
                          ModuleManager moduleManager, DevelopData developData) {
@@ -92,8 +82,6 @@ public class FireExtAction extends ExtAction {
                         "ZCWL_2026.module.algorithm.PathPlanning");
                 break;
         }
-        
-        //System.err.println("[消防车动作]");
     }
 
     @Override
@@ -116,118 +104,53 @@ public class FireExtAction extends ExtAction {
     }
 
     @Override
-public ExtAction calc() {
-    try {
-        this.result = null;
-        FireBrigade agent = (FireBrigade) this.agentInfo.me();
-        
-        // ========== 新增：视觉上报道路状态 ==========
-        reportRoadStatus(agent);
-        
-        // 防卡死检查
-        if (isStuck()) {
-            this.target = null;
-            return this;
-        }
-        
-        if (hasNoProgress()) {
-            this.target = null;
-        }
-
-        // 检测救援完成并通知救护车
-        checkAndNotifyRescueCompletion();
-
-        if (this.needRest(agent)) {
-            this.result = this.calcRefugeAction(agent, this.pathPlanning, this.target);
-            if (this.result != null) return this;
-        }
-
-        this.refillFlag = this.needRefill(agent, this.refillFlag);
-        if (this.refillFlag) {
-            this.result = this.calcRefill(agent, this.pathPlanning, this.target);
-            if (this.result != null) return this;
-        }
-
-        if (this.target == null) return this;
-        
-        StandardEntity targetEntity = this.worldInfo.getEntity(this.target);
-        if (targetEntity == null) return this;
-        
-        if (targetEntity instanceof Human) {
-            this.result = this.calcRescue(agent, this.pathPlanning, this.target);
-        } else if (targetEntity instanceof Building) {
-            this.result = this.calcExtinguish(agent, this.pathPlanning, this.target);
-        } else if (targetEntity instanceof Area) {
-            this.result = this.calcMoveToArea(agent, this.pathPlanning, this.target);
-        }
-    } catch (Exception e) {
-        System.err.println("[FireExtAction] calc() 异常: " + e.getMessage());
-        e.printStackTrace();
-        // 异常时返回休息动作，防止智能体崩溃
-        this.result = new ActionRest();
-    }
-    return this;
-}
-    
-    // ========== 新增：视觉上报道路状态 ==========
-    private void reportRoadStatus(FireBrigade agent) {
-        if (this.msgManager == null) return;
-        EntityID currentPos = agent.getPosition();
-        if (currentPos == null) return;
-        
-        StandardEntity posEntity = this.worldInfo.getEntity(currentPos);
-        if (posEntity != null && posEntity instanceof Road) {
-            reportSingleRoad((Road) posEntity);
-        }
-        
-        Collection<StandardEntity> visibleEntities = this.worldInfo.getObjectsInRange(currentPos, 25000);
-        for (StandardEntity e : visibleEntities) {
-            if (e != null && e instanceof Road) {
-                reportSingleRoad((Road) e);
+    public ExtAction calc() {
+        try {
+            this.result = null;
+            FireBrigade agent = (FireBrigade) this.agentInfo.me();
+            
+            if (isStuck()) {
+                this.target = null;
+                return this;
             }
-        }
-    }
-    
-    private void reportSingleRoad(Road road) {
-        EntityID roadId = road.getID();
-        
-        // ========== 新增：冷却检查 ==========
-        int currentTime = agentInfo.getTime();
-        Integer lastReport = roadReportCooldown.get(roadId);
-        if (lastReport != null && currentTime - lastReport < REPORT_COOLDOWN) {
-            return; // 冷却中，不上报
-        }
-        
-        if (reportedRoads.contains(roadId)) return;
-        if (!road.isBlockadesDefined()) return;
-        
-        boolean hasBlockade = !road.getBlockades().isEmpty();
-        Blockade blockade = null;
-        if (hasBlockade) {
-            EntityID blockadeId = road.getBlockades().get(0);
-            StandardEntity be = this.worldInfo.getEntity(blockadeId);
-            if (be instanceof Blockade) {
-                blockade = (Blockade) be;
+            
+            if (hasNoProgress()) {
+                this.target = null;
             }
+
+            checkAndNotifyRescueCompletion();
+
+            if (this.needRest(agent)) {
+                this.result = this.calcRefugeAction(agent, this.pathPlanning, this.target);
+                if (this.result != null) return this;
+            }
+
+            this.refillFlag = this.needRefill(agent, this.refillFlag);
+            if (this.refillFlag) {
+                this.result = this.calcRefill(agent, this.pathPlanning, this.target);
+                if (this.result != null) return this;
+            }
+
+            if (this.target == null) return this;
+            
+            StandardEntity targetEntity = this.worldInfo.getEntity(this.target);
+            if (targetEntity == null) return this;
+            
+            if (targetEntity instanceof Human) {
+                this.result = this.calcRescue(agent, this.pathPlanning, this.target);
+            } else if (targetEntity instanceof Building) {
+                this.result = this.calcExtinguish(agent, this.pathPlanning, this.target);
+            } else if (targetEntity instanceof Area) {
+                this.result = this.calcMoveToArea(agent, this.pathPlanning, this.target);
+            }
+        } catch (Exception e) {
+            System.err.println("[FireExtAction] calc() 异常: " + e.getMessage());
+            e.printStackTrace();
+            this.result = new ActionRest();
         }
-        
-        MessageRoad msg = new MessageRoad(
-            true,           // 语音
-            road,           // 道路
-            blockade,       // 障碍物（可为 null）
-            !hasBlockade,   // passable
-            false           // 不发送坐标
-        );
-        this.msgManager.addMessage(msg);
-        reportedRoads.add(roadId);
-        roadReportCooldown.put(roadId, currentTime);  // 新增：记录上报时间
-        
-        if (hasBlockade) {
-            //System.err.println("[消防车] " + agentInfo.getID() + " 视觉上报: 道路 " + roadId + " 有障碍物");
-        }
+        return this;
     }
     
-    // ==================== 救援完成检测 ====================
     private void checkAndNotifyRescueCompletion() {
         if (target == null || msgManager == null) return;
         
@@ -240,7 +163,6 @@ public ExtAction calc() {
         if (wasBuriedLastCheck && !isCurrentlyBuried) {
             MessageCivilian msg = new MessageCivilian(true, civilian);
             msgManager.addMessage(msg);
-            //System.err.println("[消防车] 🎉 救援完成！平民 " + target + " 已挖出，发送语音通知救护车");
             
             FireBrigade me = (FireBrigade) agentInfo.me();
             MessageFireBrigade actionMsg = new MessageFireBrigade(
@@ -264,14 +186,11 @@ public ExtAction calc() {
         return false;
     }
     
-    // ==================== 防卡死方法 ====================
     private boolean isStuck() {
         EntityID currentPos = this.agentInfo.getPosition();
         if (lastPosition != null && lastPosition.equals(currentPos)) {
             stuckCounter++;
             if (stuckCounter > MAX_STUCK_COUNT) {
-                //System.err.println("[消防车] ID:" + this.agentInfo.getID() + 
-                //                   " ⚠️ 卡住超过 " + MAX_STUCK_COUNT + " 步，重置目标");
                 stuckCounter = 0;
                 return true;
             }
@@ -286,8 +205,6 @@ public ExtAction calc() {
         if (lastTarget != null && lastTarget.equals(this.target)) {
             noProgressCounter++;
             if (noProgressCounter > MAX_NO_PROGRESS) {
-                //System.err.println("[消防车] ID:" + this.agentInfo.getID() + 
-                //                   " ⚠️ 对目标 " + this.target + " 无进展超过20步，放弃");
                 noProgressCounter = 0;
                 return true;
             }
@@ -298,7 +215,6 @@ public ExtAction calc() {
         return false;
     }
 
-    // ==================== 灭火相关方法 ====================
     private Action calcExtinguish(FireBrigade agent, PathPlanning pathPlanning, EntityID target) {
         EntityID agentPosition = agent.getPosition();
         StandardEntity positionEntity = Objects.requireNonNull(this.worldInfo.getPosition(agent));
@@ -319,8 +235,6 @@ public ExtAction calc() {
         if (!neighbourBuilding.isEmpty()) {
             neighbourBuilding.sort(new DistanceSorter(this.worldInfo, agent));
             Building building = (Building) neighbourBuilding.get(0);
-            System.err.println("[消防车] 🔥 灭火: " + building.getID() + 
-                               ", 火势: " + building.getFieryness());
             return new ActionExtinguish(building.getID(), this.maxExtinguishPower);
         }
         return this.getMoveAction(pathPlanning, agentPosition, target);
@@ -351,7 +265,6 @@ public ExtAction calc() {
     private Action calcRefill(FireBrigade agent, PathPlanning pathPlanning, EntityID target) {
         StandardEntityURN positionURN = Objects.requireNonNull(this.worldInfo.getPosition(agent)).getStandardURN();
         if (positionURN == REFUGE) {
-            System.err.println("[消防车] 💧 补水");
             return new ActionRefill();
         }
         Action action = this.calcRefugeAction(agent, pathPlanning, target, true);
@@ -419,7 +332,6 @@ public ExtAction calc() {
         return firstResult != null ? new ActionMove(firstResult) : null;
     }
 
-    // ==================== 救援相关方法 ====================
     private boolean isValidVictim(Human victim) {
         if (victim == null) return false;
         if (!victim.isPositionDefined()) return false;
@@ -440,7 +352,6 @@ public ExtAction calc() {
     private Action calcRescue(FireBrigade agent, PathPlanning pathPlanning, EntityID targetID) {
         Human targetHuman = (Human) this.worldInfo.getEntity(targetID);
         if (targetHuman == null) {
-            System.err.println("[消防车] ⚠️ 目标 " + targetID + " 不存在");
             this.target = null;
             return null;
         }
@@ -449,7 +360,6 @@ public ExtAction calc() {
         boolean isUnburied = targetHuman.isBuriednessDefined() && targetHuman.getBuriedness() == 0;
         
         if (isUnburied) {
-            System.err.println("[消防车] ✅ 目标 " + targetID + " 已被挖出，无需救援");
             if (targetHuman.isDamageDefined() && targetHuman.getDamage() > 0 && !reportedVictims.contains(targetID)) {
                 if (isValidVictim(targetHuman)) {
                     reportVictimToAmbulance(targetHuman);
@@ -460,13 +370,11 @@ public ExtAction calc() {
         }
         
         if (!isBuried) {
-            System.err.println("[消防车] ⚠️ 目标 " + targetID + " 埋压度未定义或为0，放弃");
             this.target = null;
             return null;
         }
         
         if (!isValidVictim(targetHuman)) {
-            System.err.println("[消防车] ⚠️ 目标 " + targetID + " 位置无效，放弃任务");
             this.target = null;
             return null;
         }
@@ -475,13 +383,11 @@ public ExtAction calc() {
         EntityID targetPosition = targetHuman.getPosition();
         
         if (targetPosition == null) {
-            System.err.println("[消防车] ⚠️ 目标 " + targetID + " 位置为 null，放弃任务");
             this.target = null;
             return null;
         }
         
         if (isInRefuge(targetHuman)) {
-            System.err.println("[消防车] 🏥 目标 " + targetID + " 已在避难所，放弃任务");
             this.target = null;
             return null;
         }
@@ -494,21 +400,15 @@ public ExtAction calc() {
         
         if (agentPosition.getValue() == targetPosition.getValue()) {
             if (targetHuman.isBuriednessDefined() && targetHuman.getBuriedness() > 0) {
-                /*System.err.println("[消防车] 🆘 救援被困单位: " + targetHuman.getID() + 
-                                   " 类型=" + targetHuman.getStandardURN() +
-                                   " 埋压度=" + targetHuman.getBuriedness());*/
                 return new ActionRescue(targetHuman);
             }
         }
         
         List<EntityID> path = pathPlanning.getResult(agentPosition, targetPosition);
         if (path != null && !path.isEmpty()) {
-            int distance = worldInfo.getDistance(agentPosition, targetPosition);
-            //System.err.println("[消防车] 📍 移动到被困单位位置: " + targetPosition + " 距离=" + distance);
             return new ActionMove(path);
         }
         
-        System.err.println("[消防车] ⚠️ 无法计算到目标 " + targetID + " 的路径");
         return null;
     }
     
@@ -524,7 +424,6 @@ public ExtAction calc() {
             MessageCivilian msg = new MessageCivilian(false, (Civilian) victim);
             this.msgManager.addMessage(msg);
             reportedVictims.add(victim.getID());
-            System.err.println("[消防车] 📢 已报告已挖出伤员: " + victim.getID());
         }
     }
     
@@ -537,7 +436,6 @@ public ExtAction calc() {
         return null;
     }
 
-    // ==================== 通用辅助方法 ====================
     private boolean needRest(Human agent) {
         int hp = agent.getHP();
         int damage = agent.getDamage();

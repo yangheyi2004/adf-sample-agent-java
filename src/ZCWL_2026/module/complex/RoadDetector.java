@@ -25,7 +25,9 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
     private Set<EntityID> targetRoads;
     private Set<EntityID> refugeAreaRoads;
     private Set<EntityID> victimBuildingRoads;
-    private Set<EntityID> reportedVisionRoads;
+    
+    // ========== 新增：消防车紧急任务触发的高优先级道路 ==========
+    private Set<EntityID> fireRescueCriticalRoads;
     
     private Set<EntityID> exploredBuildings;
     private Map<EntityID, Integer> explorationCount;
@@ -45,12 +47,12 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
         }
     }
     
-    private static Map<EntityID, LockInfo> lockedRoads = new java.util.concurrent.ConcurrentHashMap<>();
+    // ========== 修复：将静态锁改为实例变量，避免泄漏 ==========
+    private Map<EntityID, LockInfo> lockedRoads;
     private static final int LOCK_EXPIRE_TIME = 66;
     private Set<EntityID> myLockedRoads;
     
-    // 关键修复：增加搜索深度从4改为12
-    private static final int REFUGE_SEARCH_DEPTH = 12;
+    private static final int REFUGE_SEARCH_DEPTH = 6;
     
     private int lastLogTime = 0;
     private static final int LOG_INTERVAL = 10;
@@ -68,11 +70,12 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
         this.targetRoads = new HashSet<>();
         this.refugeAreaRoads = new HashSet<>();
         this.victimBuildingRoads = new HashSet<>();
-        this.reportedVisionRoads = new HashSet<>();
+        this.fireRescueCriticalRoads = new HashSet<>();   // 新增
         this.myLockedRoads = new HashSet<>();
         this.exploredBuildings = new HashSet<>();
         this.explorationCount = new HashMap<>();
         this.warnedBuildings = new HashSet<>();
+        this.lockedRoads = new HashMap<>();               // 实例变量
         
         switch (si.getMode()) {
             case PRECOMPUTATION_PHASE:
@@ -88,7 +91,7 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
         }
         this.result = null;
         
-        System.err.println("[RoadDetector] 警察 " + agentInfo.getID() + " 道路检测器已加载，搜索深度=" + REFUGE_SEARCH_DEPTH);
+        // System.err.println("[RoadDetector] 警察 " + agentInfo.getID() + " 道路检测器已加载（包含消防紧急道路），搜索深度=" + REFUGE_SEARCH_DEPTH);
     }
 
     private boolean isRoadDefined(EntityID roadId) {
@@ -136,10 +139,6 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                 EntityID positionID = this.agentInfo.getPosition();
                 EntityID myId = this.agentInfo.getID();
                 
-                System.err.println("[RoadDetector] 警察 " + myId + " 道路状态: 避难所=" + refugeAreaRoads.size() + 
-                                   ", 被困建筑=" + victimBuildingRoads.size() + 
-                                   ", 视觉上报=" + reportedVisionRoads.size());
-                
                 if (this.targetRoads.contains(positionID)) {
                     this.result = positionID;
                     return this;
@@ -154,25 +153,28 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                 }
             }
         } catch (Exception e) {
-            System.err.println("[RoadDetector] calc() 异常: " + e.getMessage());
-            e.printStackTrace();
+            // System.err.println("[RoadDetector] calc() 异常: " + e.getMessage());
+            // e.printStackTrace();
             this.result = null;
         }
         return this;
     }
 
     private EntityID selectTargetByPriority(EntityID positionID, EntityID myId) {
-        EntityID selected = selectFromSet(positionID, myId, refugeAreaRoads, true);
+        // 1. 消防车紧急任务道路（最高优先级，允许跨簇借用）
+        EntityID selected = selectFromSet(positionID, myId, fireRescueCriticalRoads, false);
         if (selected != null) {
             return selected;
         }
-        
+
+        // 2. 被困建筑周边道路
         selected = selectFromSet(positionID, myId, victimBuildingRoads, true);
         if (selected != null) {
             return selected;
         }
         
-        selected = selectFromSet(positionID, myId, reportedVisionRoads, true);
+        // 3. 避难所周边道路
+        selected = selectFromSet(positionID, myId, refugeAreaRoads, true);
         if (selected != null) {
             return selected;
         }
@@ -228,7 +230,7 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                         Set<EntityID> borrowRoads = new HashSet<>(clusterToRoads.get(bestCluster));
                         selected = selectNearestFromSet(positionID, borrowRoads);
                         if (selected != null) {
-                            System.err.println("[RoadDetector] 警察 " + myId + " 本区无任务，从簇 " + bestCluster + " 借用道路 (任务数=" + maxCount + ")");
+                            // System.err.println("[RoadDetector] 警察 " + myId + " 本区无任务，从簇 " + bestCluster + " 借用道路 (任务数=" + maxCount + ")");
                             return selected;
                         }
                     }
@@ -302,7 +304,7 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
             }
         }
         
-        System.err.println("[RoadDetector] 地图中避难所数量: " + refugeCount + ", 搜索深度: " + REFUGE_SEARCH_DEPTH);
+        // System.err.println("[RoadDetector] 地图中避难所数量: " + refugeCount + ", 搜索深度: " + REFUGE_SEARCH_DEPTH);
         
         int depth = REFUGE_SEARCH_DEPTH;
         int totalAdded = 0;
@@ -330,7 +332,7 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
             }
         }
         
-        System.err.println("[RoadDetector] 初始化完成: 避难所周边道路=" + refugeAreaRoads.size() + " (新增=" + totalAdded + ")");
+        // System.err.println("[RoadDetector] 初始化完成: 避难所周边道路=" + refugeAreaRoads.size() + " (新增=" + totalAdded + ")");
     }
 
     @Override
@@ -343,9 +345,22 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
         cleanCompletedRoads();
         cleanExpiredLocks();
         processVictimMessages(messageManager);
-        processVisionReports(messageManager);
         checkCurrentTarget();
         processMessages(messageManager);
+
+        // ========== 新增：处理消防车紧急动作，生成动态关键道路 ==========
+        for (CommunicationMessage msg : messageManager.getReceivedMessageList()) {
+            if (msg instanceof MessageFireBrigade) {
+                MessageFireBrigade mfb = (MessageFireBrigade) msg;
+                if (mfb.getAction() == MessageFireBrigade.ACTION_EXTINGUISH ||
+                    mfb.getAction() == MessageFireBrigade.ACTION_RESCUE) {
+                    EntityID targetId = mfb.getTargetID();
+                    if (targetId != null) {
+                        addFireRescueRoadsForTarget(targetId);
+                    }
+                }
+            }
+        }
         
         int currentTime = this.agentInfo.getTime();
         if (currentTime - lastLogTime >= LOG_INTERVAL) {
@@ -353,6 +368,50 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
         }
         
         return this;
+    }
+
+        private void addFireRescueRoadsForTarget(EntityID targetId) {
+        StandardEntity targetEntity = worldInfo.getEntity(targetId);
+        if (targetEntity == null) return;
+
+        // 处理目标是 Human 的情况：获取他所在的建筑
+        if (targetEntity instanceof Human) {
+            Human human = (Human) targetEntity;
+            if (human.isPositionDefined()) {
+                EntityID pos = human.getPosition();
+                StandardEntity posEntity = worldInfo.getEntity(pos);
+                if (posEntity instanceof Building) {
+                    // 为该建筑添加相邻阻塞道路
+                    Building building = (Building) posEntity;
+                    for (EntityID neighborId : building.getNeighbours()) {
+                        StandardEntity neighbor = worldInfo.getEntity(neighborId);
+                        if (neighbor instanceof Road && needsClearing(neighborId)) {
+                            fireRescueCriticalRoads.add(neighborId);
+                            targetRoads.add(neighborId);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        if (targetEntity instanceof Building) {
+            Building building = (Building) targetEntity;
+            for (EntityID neighborId : building.getNeighbours()) {
+                StandardEntity neighbor = worldInfo.getEntity(neighborId);
+                if (neighbor instanceof Road) {
+                    if (needsClearing(neighborId)) {
+                        fireRescueCriticalRoads.add(neighborId);
+                        targetRoads.add(neighborId);
+                    }
+                }
+            }
+        } else if (targetEntity instanceof Road) {
+            if (needsClearing(targetId)) {
+                fireRescueCriticalRoads.add(targetId);
+                targetRoads.add(targetId);
+            }
+        }
     }
 
     private void cleanCompletedRoads() {
@@ -378,7 +437,7 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                 targetRoads.remove(roadId);
                 refugeAreaRoads.remove(roadId);
                 victimBuildingRoads.remove(roadId);
-                reportedVisionRoads.remove(roadId);
+                fireRescueCriticalRoads.remove(roadId);
                 myLockedRoads.remove(roadId);
                 lockedRoads.remove(roadId);
             }
@@ -500,26 +559,6 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
         return null;
     }
 
-    private void processVisionReports(MessageManager messageManager) {
-        for (CommunicationMessage msg : messageManager.getReceivedMessageList()) {
-            if (msg instanceof MessageRoad) {
-                MessageRoad mr = (MessageRoad) msg;
-                Boolean passable = mr.isPassable();
-                if (mr.isRadio() && passable != null && !passable) {
-                    EntityID roadId = mr.getRoadID();
-                    StandardEntity e = worldInfo.getEntity(roadId);
-                    if (e == null || !(e instanceof Road)) continue;
-                    
-                    if (needsClearing(roadId)) {
-                        if (reportedVisionRoads.add(roadId)) {
-                            targetRoads.add(roadId);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     private void checkCurrentTarget() {
         if (this.result != null) {
             StandardEntity entity = this.worldInfo.getEntity(this.result);
@@ -529,7 +568,7 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                 targetRoads.remove(this.result);
                 refugeAreaRoads.remove(this.result);
                 victimBuildingRoads.remove(this.result);
-                reportedVisionRoads.remove(this.result);
+                fireRescueCriticalRoads.remove(this.result);
                 this.result = null;
                 return;
             }
@@ -541,7 +580,7 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                     targetRoads.remove(this.result);
                     refugeAreaRoads.remove(this.result);
                     victimBuildingRoads.remove(this.result);
-                    reportedVisionRoads.remove(this.result);
+                    fireRescueCriticalRoads.remove(this.result);
                     this.result = null;
                 }
             }
@@ -562,7 +601,7 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                     targetRoads.remove(roadId);
                     refugeAreaRoads.remove(roadId);
                     victimBuildingRoads.remove(roadId);
-                    reportedVisionRoads.remove(roadId);
+                    fireRescueCriticalRoads.remove(roadId);
                     lockedRoads.remove(roadId);
                     myLockedRoads.remove(roadId);
                 }
@@ -587,8 +626,8 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
             explorationCount.put(buildingId, count);
             
             if (count >= MAX_EXPLORATION_COUNT && !warnedBuildings.contains(buildingId)) {
-                System.err.println("[RoadDetector] 警告：警察 " + agentInfo.getID() + 
-                                   " 重复探索建筑 " + buildingId + " " + count + " 次");
+                // System.err.println("[RoadDetector] 警告：警察 " + agentInfo.getID() + 
+                                   // " 重复探索建筑 " + buildingId + " " + count + " 次");
                 warnedBuildings.add(buildingId);
             }
         } else {

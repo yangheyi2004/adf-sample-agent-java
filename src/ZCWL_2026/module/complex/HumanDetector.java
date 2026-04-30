@@ -120,8 +120,8 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                             continue;
                         }
                         if (knownUnburiedVictims.add(c.getID())) {
-                            System.err.println("[HumanDetector] 救护车 " + this.agentInfo.getID() + " 全量扫描发现已挖出伤员: " + c.getID() +
-                                               " 伤害=" + c.getDamage() + " 位置=" + c.getPosition());
+                            // System.err.println("[HumanDetector] 救护车 " + this.agentInfo.getID() + " 全量扫描发现已挖出伤员: " + c.getID() +
+                            //                                   " 伤害=" + c.getDamage() + " 位置=" + c.getPosition());
                         }
                     }
                 }
@@ -150,7 +150,7 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                             } else {
                                 // 位置无效，说明已被装载，从待装载列表中移除并加入缓存
                                 if (knownUnburiedVictims.remove(victimId)) {
-                                    System.err.println("[HumanDetector] 救护车 " + this.agentInfo.getID() + " 收到语音装载通知，立即移除平民: " + victimId);
+                                    // System.err.println("[HumanDetector] 救护车 " + this.agentInfo.getID() + " 收到语音装载通知，立即移除平民: " + victimId);
                                 }
                                 loadedVictimsCache.add(victimId);
                             }
@@ -189,21 +189,21 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                         if (senderId.equals(this.agentInfo.getID())) {
                             if (victimId != null) {
                                 if (knownUnburiedVictims.remove(victimId)) {
-                                    System.err.println("[HumanDetector] 救护车 " + senderId + " 装载完成，移除平民: " + victimId);
+                                    // System.err.println("[HumanDetector] 救护车 " + senderId + " 装载完成，移除平民: " + victimId);
                                 }
                                 loadedVictimsCache.add(victimId);
                             }
                         } else {
                             // 其他救护车装载的消息，也尝试移除但记录日志
                             if (knownUnburiedVictims.remove(victimId)) {
-                                System.err.println("[HumanDetector] 其他救护车 " + senderId + " 装载了平民: " + victimId + "，已从本车列表中移除");
+                                // System.err.println("[HumanDetector] 其他救护车 " + senderId + " 装载了平民: " + victimId + "，已从本车列表中移除");
                             }
                             loadedVictimsCache.add(victimId);
                         }
                     } else if (mat.getAction() == MessageAmbulanceTeam.ACTION_UNLOAD) {
                         EntityID victimId = mat.getTargetID();
                         if (victimId != null && knownUnburiedVictims.remove(victimId)) {
-                            System.err.println("[HumanDetector] 救护车 " + this.agentInfo.getID() + " 收到卸载消息，移除平民: " + victimId);
+                            // System.err.println("[HumanDetector] 救护车 " + this.agentInfo.getID() + " 收到卸载消息，移除平民: " + victimId);
                         }
                     }
                 }
@@ -215,7 +215,7 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
         int currentTimeLog = this.agentInfo.getTime();
         if (currentTimeLog - lastLogTime >= LOG_INTERVAL) {
             lastLogTime = currentTimeLog;
-            logPendingVictims();
+            // logPendingVictims(); // 日志已注释
         }
         
         return this;
@@ -340,6 +340,18 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
             }
         }
         knownBuriedVictims.removeAll(toRemove);
+
+        // ========== 修复：清理 loadedVictimsCache 中的无效条目 ==========
+        loadedVictimsCache.removeIf(vid -> {
+            Human h = (Human) worldInfo.getEntity(vid);
+            if (h == null) return true;
+            if (h.isHPDefined() && h.getHP() == 0) return true;
+            if (!h.isPositionDefined()) return true;
+            EntityID pos = h.getPosition();
+            if (pos == null) return true;
+            StandardEntity posEntity = worldInfo.getEntity(pos);
+            return posEntity != null && posEntity.getStandardURN() == REFUGE;
+        });
     }
 
     @Override
@@ -367,7 +379,7 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                         EntityID nearest = findNearestVictim(validTargets);
                         if (nearest != null) {
                             this.result = nearest;
-                            System.err.println("[救护车 " + this.agentInfo.getID() + "] 选择已挖出伤员: " + nearest);
+                            // System.err.println("[救护车 " + this.agentInfo.getID() + "] 选择已挖出伤员: " + nearest);
                             return this;
                         }
                     }
@@ -448,8 +460,8 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                 }
             }
         } catch (Exception e) {
-            System.err.println("[HumanDetector] calc() 异常: " + e.getMessage());
-            e.printStackTrace();
+            // System.err.println("[HumanDetector] calc() 异常: " + e.getMessage());
+            // e.printStackTrace();
             this.result = null;
         }
         return this;

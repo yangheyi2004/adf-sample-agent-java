@@ -84,14 +84,14 @@ public class AmbulanceTargetAllocator extends adf.core.component.module.complex.
                     info.transportHuman = null;
                     info.commandTime = this.agentInfo.getTime();
                     ambulanceInfoMap.put(id, info);
-                    System.err.println("[救护车分配器] 初始化救护车: " + id);
+                    //System.err.println("[救护车分配器] 初始化救护车: " + id);
                 }
             }
         }
         ambulancesInitialized = true;
         
         if (!ambulanceInfoMap.isEmpty()) {
-            System.err.println("[救护车分配器] 救护车初始化完成，共 " + ambulanceInfoMap.size() + " 辆");
+           // System.err.println("[救护车分配器] 救护车初始化完成，共 " + ambulanceInfoMap.size() + " 辆");
         }
     }
 
@@ -173,7 +173,7 @@ public class AmbulanceTargetAllocator extends adf.core.component.module.complex.
         }
         this.loadTasks.addAll(newLoadTasks);
         if (!newLoadTasks.isEmpty()) {
-            System.err.println("[救护车分配器] 扫描到 " + newLoadTasks.size() + " 个平民等待装载");
+           // System.err.println("[救护车分配器] 扫描到 " + newLoadTasks.size() + " 个平民等待装载");
         }
     }
     
@@ -209,7 +209,7 @@ public class AmbulanceTargetAllocator extends adf.core.component.module.complex.
             }
         }
         if (foundCount > 0) {
-            System.err.println("[救护车分配器] 主动扫描发现 " + foundCount + " 个待救护平民");
+           // System.err.println("[救护车分配器] 主动扫描发现 " + foundCount + " 个待救护平民");
         }
     }
     
@@ -308,7 +308,7 @@ public class AmbulanceTargetAllocator extends adf.core.component.module.complex.
         }
         
         if (assignedCount > 0) {
-            System.err.println("[救护车分配器] ✅ 本轮分配了 " + assignedCount + " 辆救护车");
+            //System.err.println("[救护车分配器] ✅ 本轮分配了 " + assignedCount + " 辆救护车");
         }
         loadTasks.removeAll(assignedTasks);
     }
@@ -365,7 +365,7 @@ public class AmbulanceTargetAllocator extends adf.core.component.module.complex.
             info.commandTime = this.agentInfo.getTime();
             taskStartTime.putIfAbsent(target, this.agentInfo.getTime());
             
-            System.err.println("[救护车分配器] 救护车 " + ambulanceId + " 分配任务: " + target);
+            //System.err.println("[救护车分配器] 救护车 " + ambulanceId + " 分配任务: " + target);
         }
     }
     
@@ -387,7 +387,7 @@ public class AmbulanceTargetAllocator extends adf.core.component.module.complex.
                 info.currentTask = null;
                 info.isBusy = false;
                 taskStartTime.remove(task);
-                System.err.println("[救护车分配器] 🔄 主动释放无效任务: 救护车 " + info.id + " 目标 " + task + " 已失效");
+               // System.err.println("[救护车分配器] 🔄 主动释放无效任务: 救护车 " + info.id + " 目标 " + task + " 已失效");
             }
         }
         for (EntityID completed : new HashSet<>(completedTasks)) {
@@ -401,8 +401,8 @@ public class AmbulanceTargetAllocator extends adf.core.component.module.complex.
     private void logTaskQueue() {
         int loadCount = loadTasks.size();
         int assignedCount = taskAssignCount.size();
-        System.err.printf("[救护分配器] 时间=%d 装载任务=%d 已分配=%d%n",
-                this.agentInfo.getTime(), loadCount, assignedCount);
+        //System.err.printf("[救护分配器] 时间=%d 装载任务=%d 已分配=%d%n",
+                //this.agentInfo.getTime(), loadCount, assignedCount);
     }
 
     @Override
@@ -488,13 +488,13 @@ public class AmbulanceTargetAllocator extends adf.core.component.module.complex.
                 info.transportHuman = mat.getTargetID();
                 info.isBusy = true;
                 victimsWaitingForLoad.add(mat.getTargetID());
-                System.err.println("[救护车分配器] 救护车 " + mat.getAgentID() + " 执行装载，目标: " + mat.getTargetID());
+                //System.err.println("[救护车分配器] 救护车 " + mat.getAgentID() + " 执行装载，目标: " + mat.getTargetID());
             } else if (mat.getAction() == MessageAmbulanceTeam.ACTION_UNLOAD) {
                 info.transportHuman = null;
                 info.isBusy = false;
                 info.currentTask = null;
                 victimsWaitingForLoad.clear();
-                System.err.println("[救护车分配器] 救护车 " + mat.getAgentID() + " 执行卸载");
+                //System.err.println("[救护车分配器] 救护车 " + mat.getAgentID() + " 执行卸载");
             }
             if (currentTime >= info.commandTime + 2) {
                 updateAmbulanceInfo(info, mat);
@@ -512,7 +512,7 @@ public class AmbulanceTargetAllocator extends adf.core.component.module.complex.
                     victimsWaitingForLoad.remove(info.currentTask);
                     info.currentTask = null;
                     info.isBusy = false;
-                    System.err.println("[救护车分配器] 救护车 " + report.getSenderID() + " 报告任务完成");
+                    //System.err.println("[救护车分配器] 救护车 " + report.getSenderID() + " 报告任务完成");
                 }
             }
         }
