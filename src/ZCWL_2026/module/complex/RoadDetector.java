@@ -161,20 +161,21 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
     }
 
     private EntityID selectTargetByPriority(EntityID positionID, EntityID myId) {
-        // 1. 消防车紧急任务道路（最高优先级，允许跨簇借用）
-        EntityID selected = selectFromSet(positionID, myId, fireRescueCriticalRoads, false);
+        // ★ 优先级调整：避难所道路 > 消防紧急道路 > 被困建筑周边道路
+        // 1. 避难所周边道路（最高优先级，允许跨簇借用）
+        EntityID selected = selectFromSet(positionID, myId, refugeAreaRoads, false);
         if (selected != null) {
             return selected;
         }
 
-        // 2. 被困建筑周边道路
-        selected = selectFromSet(positionID, myId, victimBuildingRoads, true);
+        // 2. 消防车紧急任务道路（次优先级，也允许跨簇借用）
+        selected = selectFromSet(positionID, myId, fireRescueCriticalRoads, false);
         if (selected != null) {
             return selected;
         }
-        
-        // 3. 避难所周边道路
-        selected = selectFromSet(positionID, myId, refugeAreaRoads, true);
+
+        // 3. 被困建筑周边道路
+        selected = selectFromSet(positionID, myId, victimBuildingRoads, true);
         if (selected != null) {
             return selected;
         }

@@ -438,6 +438,20 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                         if (!reportedVictims.contains(best)) {
                             sendReportMessage(victim);
                             reportedVictims.add(best);
+                            
+                            // ★ 优化：选定目标后立即通知警察提前清理通往目标建筑的道路
+                            if (victim.isPositionDefined() && this.msgManager != null) {
+                                EntityID buildingId = victim.getPosition();
+                                if (buildingId != null) {
+                                    MessageFireBrigade roadRequest = new MessageFireBrigade(
+                                        true,                              // 无线消息
+                                        (FireBrigade) this.agentInfo.me(), // 消防车自身
+                                        MessageFireBrigade.ACTION_RESCUE,  // 救援动作
+                                        buildingId                         // 目标建筑ID
+                                    );
+                                    this.msgManager.addMessage(roadRequest);
+                                }
+                            }
                         }
                         return this;
                     }
