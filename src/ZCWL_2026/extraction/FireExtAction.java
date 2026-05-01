@@ -152,29 +152,34 @@ public class FireExtAction extends ExtAction {
     }
     
     private void checkAndNotifyRescueCompletion() {
-        if (target == null || msgManager == null) return;
-        
-        StandardEntity entity = worldInfo.getEntity(target);
-        if (!(entity instanceof Civilian)) return;
-        
-        Civilian civilian = (Civilian) entity;
-        boolean isCurrentlyBuried = civilian.isBuriednessDefined() && civilian.getBuriedness() > 0;
-        
-        if (wasBuriedLastCheck && !isCurrentlyBuried) {
-            MessageCivilian msg = new MessageCivilian(true, civilian);
-            msgManager.addMessage(msg);
-            
-            FireBrigade me = (FireBrigade) agentInfo.me();
-            MessageFireBrigade actionMsg = new MessageFireBrigade(
-                    true, me, MessageFireBrigade.ACTION_REST, me.getPosition());
-            msgManager.addMessage(actionMsg);
-        }
-        
-        wasBuriedLastCheck = isCurrentlyBuried;
-        if (!target.equals(previousTarget)) {
-            previousTarget = target;
-        }
+    if (target == null || msgManager == null) return;
+    
+    StandardEntity entity = worldInfo.getEntity(target);
+    if (!(entity instanceof Civilian)) return;
+    
+    Civilian civilian = (Civilian) entity;
+    boolean isCurrentlyBuried = civilian.isBuriednessDefined() && civilian.getBuriedness() > 0;
+    
+    // 检测掩埋状态从 true 变为 false 的瞬间（即救出完成）
+    if (wasBuriedLastCheck && !isCurrentlyBuried) {
+        // 1. 发送语音消息通知救护车（所有救护车都能收到）
+        MessageCivilian msg = new MessageCivilian(true, civilian);
+        msgManager.addMessage(msg);
+        System.err.println("[FireExtAction] 消防车 " + agentInfo.getID() +
+                " 救出平民 " + civilian.getID() + "，已发送语音消息通知救护车");
+
+        // 2. 发送消防车自身的状态消息（告知正在休息，避免被误判为忙碌）
+        FireBrigade me = (FireBrigade) agentInfo.me();
+        MessageFireBrigade actionMsg = new MessageFireBrigade(
+                true, me, MessageFireBrigade.ACTION_REST, me.getPosition());
+        msgManager.addMessage(actionMsg);
     }
+    
+    wasBuriedLastCheck = isCurrentlyBuried;
+    if (!target.equals(previousTarget)) {
+        previousTarget = target;
+    }
+}
     
     private boolean isTargetBuried(EntityID targetId) {
         if (targetId == null) return false;
@@ -413,19 +418,22 @@ public class FireExtAction extends ExtAction {
     }
     
     private void reportVictimToAmbulance(Human victim) {
-        if (this.msgManager == null) return;
-        if (reportedVictims.contains(victim.getID())) return;
-        if (!victim.isPositionDefined()) return;
-        EntityID pos = victim.getPosition();
-        if (pos == null) return;
-        if (victim.isDamageDefined() && victim.getDamage() == 0) return;
-        
-        if (victim instanceof Civilian) {
-            MessageCivilian msg = new MessageCivilian(false, (Civilian) victim);
-            this.msgManager.addMessage(msg);
-            reportedVictims.add(victim.getID());
-        }
+    if (this.msgManager == null) return;
+    if (reportedVictims.contains(victim.getID())) return; // 防止重复发送
+    if (!victim.isPositionDefined()) return;
+    EntityID pos = victim.getPosition();
+    if (pos == null) return;
+    if (victim.isDamageDefined() && victim.getDamage() == 0) return; // 无伤害无需装载
+
+    if (victim instanceof Civilian) {
+        // 发送无线消息（非语音）告知救护车有需要装载的平民
+        MessageCivilian msg = new MessageCivilian(false, (Civilian) victim);
+        this.msgManager.addMessage(msg);
+        reportedVictims.add(victim.getID());
+        System.err.println("[FireExtAction] 消防车 " + agentInfo.getID() +
+                " 发送无线消息通知救护车：平民 " + victim.getID() + " 待装载");
     }
+}
     
     private Action calcMoveToArea(FireBrigade agent, PathPlanning pathPlanning, EntityID target) {
         EntityID agentPosition = agent.getPosition();

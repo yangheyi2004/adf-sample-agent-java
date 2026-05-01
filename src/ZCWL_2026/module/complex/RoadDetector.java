@@ -46,7 +46,7 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
 
     private static final int REFUGE_SEARCH_DEPTH = 6;
     private int lastLogTime = 0;
-    private static final int LOG_INTERVAL = 5;
+    private static final int LOG_INTERVAL = 20;
 
     private adf.core.component.module.algorithm.Clustering policeClustering;
     private boolean amIBuried;
