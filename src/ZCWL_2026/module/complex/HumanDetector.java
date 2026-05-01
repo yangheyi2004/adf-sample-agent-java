@@ -41,7 +41,7 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
     private Map<EntityID, Integer> targetStartTime;
     private Map<EntityID, Integer> targetLastProgress;
     private Map<EntityID, Integer> targetLastBuriedness;
-    private static final int TARGET_TIMEOUT = 40;         // 40步无进展放弃
+    private static final int TARGET_TIMEOUT = 55;         // 55步无进展放弃
 
     // ========== 新增：消防车任务冷却相关 ==========
     private Map<EntityID, Integer> cooldownVictims;      // 进入冷却的目标及其冷却结束时间
