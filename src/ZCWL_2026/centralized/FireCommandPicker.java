@@ -32,7 +32,7 @@ public class FireCommandPicker extends adf.core.component.centralized.CommandPic
         this.messages = new ArrayList<>();
         this.allocationData = null;
         this.scoutDistance = developData.getInteger("FireCommandPicker.scoutDistance", 40000);
-        System.err.println("[FireCommandPicker] 已初始化");
+        //System.err.println("[FireCommandPicker] 已初始化");
     }
 
     @Override

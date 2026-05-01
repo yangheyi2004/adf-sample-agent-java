@@ -48,8 +48,6 @@ public class PoliceBalancedClustering extends Clustering {
         this.clusterCenters = new HashMap<>();
         this.clusterRoadCount = new HashMap<>();
         this.isInitialized = false;
-        
-        //System.err.println("[警察均衡聚类] 初始化，警察数量=" + clusterSize);
     }
 
     @Override
@@ -60,12 +58,10 @@ public class PoliceBalancedClustering extends Clustering {
         collectPolice();
         
         if (allRoads.isEmpty()) {
-            //System.err.println("[警察均衡聚类] 未找到任何道路，聚类终止");
             return this;
         }
         
         if (allPolice.isEmpty()) {
-            //System.err.println("[警察均衡聚类] 未找到任何警察，聚类终止");
             return this;
         }
         
@@ -93,19 +89,6 @@ public class PoliceBalancedClustering extends Clustering {
         
         minRoadCount = clusterRoadCount.values().stream().min(Integer::compareTo).orElse(0);
         maxRoadCount = clusterRoadCount.values().stream().max(Integer::compareTo).orElse(0);
-        
-        double avgRoadCount = clusterEntityIDsList.stream()
-            .mapToInt(List::size)
-            .average()
-            .orElse(0);
-        
-        //System.err.printf("[警察均衡聚类] 负载均衡: 总道路=%d, 簇数=%d, 平均=%.1f, 最小=%d, 最大=%d%n",
-           // allRoads.size(), clusterEntityIDsList.size(), avgRoadCount, minRoadCount, maxRoadCount);
-        
-        //for (int i = 0; i < clusterEntityIDsList.size(); i++) {
-           // System.err.printf("[警察均衡聚类] 簇%d: 道路数=%d%n", 
-               // i, clusterEntityIDsList.get(i).size());
-       // }
     }
     
     private void collectRoads() {
@@ -118,7 +101,7 @@ public class PoliceBalancedClustering extends Clustering {
                 }
             }
         }
-        //System.err.println("[警察均衡聚类] 收集到 " + allRoads.size() + " 条道路");
+        allRoads.sort(Comparator.comparingInt(r -> r.id.getValue()));
     }
     
     private void collectPolice() {
@@ -126,7 +109,7 @@ public class PoliceBalancedClustering extends Clustering {
         for (StandardEntity e : this.worldInfo.getEntitiesOfType(POLICE_FORCE)) {
             if (e instanceof PoliceForce) {
                 PoliceForce police = (PoliceForce) e;
-                
+                // 保留所有警察，包括可能被掩埋的，以确保每个警察都有集群索引
                 if (police.isXDefined() && police.isYDefined()) {
                     allPolice.add(new PoliceWithLocation(police.getID(), police.getX(), police.getY()));
                 } 
@@ -141,13 +124,16 @@ public class PoliceBalancedClustering extends Clustering {
                 }
             }
         }
-        
-        if (allPolice.isEmpty()) {
+        // 确保所有警察都被添加，即使没有坐标
+        if (allPolice.size() < this.worldInfo.getEntitiesOfType(POLICE_FORCE).size()) {
+            Set<EntityID> existing = allPolice.stream().map(p -> p.id).collect(Collectors.toSet());
             for (StandardEntity e : this.worldInfo.getEntitiesOfType(POLICE_FORCE)) {
-                allPolice.add(new PoliceWithLocation(e.getID(), 0, 0));
+                if (!existing.contains(e.getID())) {
+                    allPolice.add(new PoliceWithLocation(e.getID(), 0, 0));
+                }
             }
         }
-        //System.err.println("[警察均衡聚类] 收集到 " + allPolice.size() + " 个警察");
+        allPolice.sort(Comparator.comparingInt(p -> p.id.getValue()));
     }
     
     private List<List<RoadWithLocation>> recursiveSplit(List<RoadWithLocation> points, int k) {
@@ -180,7 +166,7 @@ public class PoliceBalancedClustering extends Clustering {
             return result;
         }
         
-        Random random = new Random();
+        Random random = new Random(getFixedSeed());
         List<RoadWithLocation> centers = new ArrayList<>();
         
         centers.add(points.get(random.nextInt(points.size())));
@@ -229,6 +215,11 @@ public class PoliceBalancedClustering extends Clustering {
         } while (changed && iteration < repeat);
         
         return clusters;
+    }
+    
+    private long getFixedSeed() {
+        return Objects.hash(worldInfo.getBounds().getX(), worldInfo.getBounds().getY(),
+                            worldInfo.getBounds().getWidth(), worldInfo.getBounds().getHeight(), 0x50D1CE);
     }
     
     private RoadWithLocation findFarthestPoint(List<RoadWithLocation> points, RoadWithLocation from) {
@@ -281,68 +272,44 @@ public class PoliceBalancedClustering extends Clustering {
             assignPoliceByOrder();
             return;
         }
-        
-        List<PoliceAssignment> assignments = new ArrayList<>();
+
+        List<PoliceAssignment> allCombinations = new ArrayList<>();
         for (PoliceWithLocation police : allPolice) {
-            int nearestCluster = -1;
-            double minDist = Double.MAX_VALUE;
             for (Map.Entry<Integer, Point2D> entry : clusterCenters.entrySet()) {
+                int clusterIdx = entry.getKey();
                 double dist = police.distanceTo(entry.getValue());
-                if (dist < minDist) {
-                    minDist = dist;
-                    nearestCluster = entry.getKey();
-                }
+                allCombinations.add(new PoliceAssignment(police.id, clusterIdx, dist));
             }
-            assignments.add(new PoliceAssignment(police.id, nearestCluster, minDist));
         }
-        
-        assignments.sort(Comparator.comparingDouble(a -> a.distance));
-        
-        Map<Integer, Integer> clusterAssignCount = new HashMap<>();
-        
+        allCombinations.sort(Comparator.comparingDouble(a -> a.distance));
+
+        Set<EntityID> assignedPolice = new HashSet<>();
         Set<Integer> assignedClusters = new HashSet<>();
-        for (PoliceAssignment assignment : assignments) {
-            if (!assignedClusters.contains(assignment.clusterIndex)) {
-                policeToClusterMap.put(assignment.policeId, assignment.clusterIndex);
-                clusterAssignCount.put(assignment.clusterIndex, 
-                    clusterAssignCount.getOrDefault(assignment.clusterIndex, 0) + 1);
-                assignedClusters.add(assignment.clusterIndex);
+
+        for (PoliceAssignment assign : allCombinations) {
+            if (assignedPolice.contains(assign.policeId)) continue;
+            if (assignedClusters.contains(assign.clusterIndex)) continue;
+
+            policeToClusterMap.put(assign.policeId, assign.clusterIndex);
+            assignedPolice.add(assign.policeId);
+            assignedClusters.add(assign.clusterIndex);
+
+            if (assignedPolice.size() == allPolice.size()) break;
+        }
+
+        if (assignedPolice.size() < allPolice.size()) {
+            List<EntityID> unassigned = allPolice.stream()
+                    .map(p -> p.id)
+                    .filter(id -> !policeToClusterMap.containsKey(id))
+                    .collect(Collectors.toList());
+            List<Integer> emptyClusters = new ArrayList<>();
+            for (int i = 0; i < clusterEntityIDsList.size(); i++) {
+                if (!assignedClusters.contains(i)) emptyClusters.add(i);
+            }
+            for (int i = 0; i < unassigned.size() && i < emptyClusters.size(); i++) {
+                policeToClusterMap.put(unassigned.get(i), emptyClusters.get(i));
             }
         }
-        
-        List<PoliceAssignment> remaining = new ArrayList<>();
-        for (PoliceAssignment assignment : assignments) {
-            if (!policeToClusterMap.containsKey(assignment.policeId)) {
-                remaining.add(assignment);
-            }
-        }
-        
-        remaining.sort((a, b) -> {
-            int countA = clusterAssignCount.getOrDefault(a.clusterIndex, 0);
-            int countB = clusterAssignCount.getOrDefault(b.clusterIndex, 0);
-            if (countA != countB) {
-                return Integer.compare(countA, countB);
-            }
-            return Double.compare(a.distance, b.distance);
-        });
-        
-        for (PoliceAssignment assignment : remaining) {
-            policeToClusterMap.put(assignment.policeId, assignment.clusterIndex);
-            clusterAssignCount.put(assignment.clusterIndex,
-                clusterAssignCount.getOrDefault(assignment.clusterIndex, 0) + 1);
-        }
-        
-        //System.err.println("[警察均衡聚类] 警察分配结果:");
-        for (Map.Entry<EntityID, Integer> entry : policeToClusterMap.entrySet()) {
-            int roadCount = clusterEntityIDsList.get(entry.getValue()).size();
-           // System.err.printf("[警察均衡聚类]   警察 %d -> 簇 %d (道路数=%d)%n", 
-               // entry.getKey().getValue(), entry.getValue(), roadCount);
-        }
-        
-        int maxPolicePerCluster = clusterAssignCount.values().stream().max(Integer::compareTo).orElse(0);
-        int minPolicePerCluster = clusterAssignCount.values().stream().min(Integer::compareTo).orElse(0);
-        //System.err.printf("[警察均衡聚类] 警察分配均衡: 最小=%d, 最大=%d%n", 
-           // minPolicePerCluster, maxPolicePerCluster);
     }
     
     private void assignPoliceByOrder() {
@@ -375,14 +342,16 @@ public class PoliceBalancedClustering extends Clustering {
     }
     
     private void logResult() {
-        int min = Integer.MAX_VALUE, max = Integer.MIN_VALUE;
-        for (List<EntityID> ids : clusterEntityIDsList) {
-            int s = ids.size();
-            if (s < min) min = s;
-            if (s > max) max = s;
+        //System.err.println("[警察均衡聚类] 分配完成，每个集群的警察数量：");
+        Map<Integer, Integer> countMap = new HashMap<>();
+        for (EntityID pid : policeToClusterMap.keySet()) {
+            int cid = policeToClusterMap.get(pid);
+            countMap.put(cid, countMap.getOrDefault(cid, 0) + 1);
         }
-       // System.err.printf("[警察均衡聚类] 完成聚类，警察数量=%d, 总道路数=%d, 簇道路数范围: %d ~ %d%n",
-           // clusterSize, allRoads.size(), min, max);
+        for (int i = 0; i < clusterEntityIDsList.size(); i++) {
+            int c = countMap.getOrDefault(i, 0);
+            //System.err.printf("  集群 %d : %d 名警察%s%n", i, c, c > 1 ? " ★ 重复！" : "");
+        }
     }
     
     public int getMinRoadCount() { return minRoadCount; }
