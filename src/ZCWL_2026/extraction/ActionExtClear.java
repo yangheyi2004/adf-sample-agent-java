@@ -39,13 +39,7 @@ public class ActionExtClear extends adf.core.component.extaction.ExtAction {
     private int oldClearY;
     private int count;
 
-    // ========== 无效清理检测相关字段 ==========
-    private EntityID lastClearTarget = null;
-    private int lastBlockadeCount = -1;
-    private int invalidClearCounter = 0;
-    private static final int INVALID_CLEAR_LIMIT = 5;
-
-    public ActionExtClear(AgentInfo ai, WorldInfo wi, ScenarioInfo si,
+    public ActionExtClear(AgentInfo ai, WorldInfo wi, ScenarioInfo si, 
                           ModuleManager moduleManager, DevelopData developData) {
         super(ai, wi, si, moduleManager, developData);
         this.clearDistance = si.getClearRepairDistance();
@@ -150,20 +144,20 @@ public class ActionExtClear extends adf.core.component.extaction.ExtAction {
         if (this.target == null) {
             return this;
         }
-
+        
         EntityID agentPosition = policeForce.getPosition();
         StandardEntity targetEntity = this.worldInfo.getEntity(this.target);
         StandardEntity positionEntity = Objects.requireNonNull(this.worldInfo.getEntity(agentPosition));
-
+        
         if (targetEntity == null || !(targetEntity instanceof Area)) {
             return this;
         }
-
+        
         if (positionEntity instanceof Road) {
             this.result = this.getRescueAction(policeForce, (Road) positionEntity);
             if (this.result != null) return this;
         }
-
+        
         if (agentPosition.equals(this.target)) {
             this.result = this.getAreaClearAction(policeForce, targetEntity);
         } else if (((Area) targetEntity).getEdgeTo(agentPosition) != null) {
@@ -197,76 +191,22 @@ public class ActionExtClear extends adf.core.component.extaction.ExtAction {
                 }
             }
         }
-
-        // ========== 无效清理检测与强制移动 ==========
-        if (this.target != null && this.worldInfo.getEntity(this.target) instanceof Road) {
-            Road targetRoad = (Road) this.worldInfo.getEntity(this.target);
-            int currentBlockadeCount = targetRoad.isBlockadesDefined() ? targetRoad.getBlockades().size() : -1;
-
-            if (this.target.equals(lastClearTarget)) {
-                if (currentBlockadeCount == lastBlockadeCount) {
-                    invalidClearCounter++;
-                    if (invalidClearCounter >= INVALID_CLEAR_LIMIT) {
-                        System.err.println("[ActionExtClear] 警察 " + agentInfo.getID() +
-                                " 在道路 " + this.target + " 连续无效清理 " + INVALID_CLEAR_LIMIT + " 次，强制放弃");
-                        invalidClearCounter = 0;
-                        lastClearTarget = null;
-                        EntityID fallbackRoad = findNearbyUnblockedRoad(policeForce);
-                        if (fallbackRoad != null) {
-                            List<EntityID> path = pathPlanning.getResult(agentPosition, fallbackRoad);
-                            if (path != null && !path.isEmpty()) {
-                                this.result = new ActionMove(path);
-                                return this;
-                            }
-                        }
-                        this.result = new ActionRest();
-                        return this;
-                    }
-                } else {
-                    invalidClearCounter = 0;
-                }
-            } else {
-                invalidClearCounter = 0;
-            }
-            lastClearTarget = this.target;
-            lastBlockadeCount = currentBlockadeCount;
-        }
-
         return this;
     }
 
-    private EntityID findNearbyUnblockedRoad(PoliceForce police) {
-        EntityID currentPos = police.getPosition();
-        StandardEntity posEntity = worldInfo.getEntity(currentPos);
-        if (posEntity instanceof Road) {
-            Road road = (Road) posEntity;
-            for (EntityID neighbour : road.getNeighbours()) {
-                if (worldInfo.getEntity(neighbour) instanceof Road) {
-                    Road nbRoad = (Road) worldInfo.getEntity(neighbour);
-                    if (!nbRoad.isBlockadesDefined() || nbRoad.getBlockades().isEmpty()) {
-                        return neighbour;
-                    }
-                }
-            }
-        }
-        return null;
-    }
-
-    // ── 所有清理动作均已改为整体清理 ──
-
     private Action getRescueAction(PoliceForce police, Road road) {
         if (!road.isBlockadesDefined()) return null;
-
-        List<Blockade> blockades = this.worldInfo.getBlockades(road)
-                .stream().filter(Blockade::isApexesDefined).collect(Collectors.toList());
-        if (blockades.isEmpty()) return null;
-
+        
+        Collection<Blockade> blockades = this.worldInfo.getBlockades(road)
+            .stream().filter(Blockade::isApexesDefined).collect(Collectors.toSet());
         Collection<StandardEntity> agents = this.worldInfo.getEntitiesOfType(
-                AMBULANCE_TEAM, FIRE_BRIGADE);
+            AMBULANCE_TEAM, FIRE_BRIGADE);
 
         double policeX = police.getX();
         double policeY = police.getY();
-
+        double minDistance = Double.MAX_VALUE;
+        Action moveAction = null;
+        
         for (StandardEntity entity : agents) {
             Human human = (Human) entity;
             if (!human.isPositionDefined() || human.getPosition().getValue() != road.getID().getValue()) {
@@ -274,46 +214,134 @@ public class ActionExtClear extends adf.core.component.extaction.ExtAction {
             }
             double humanX = human.getX();
             double humanY = human.getY();
-
+            ActionClear actionClear = null;
+            
             for (Blockade blockade : blockades) {
                 if (!this.isInside(humanX, humanY, blockade.getApexes())) continue;
-
+                
+                double distance = this.getDistance(policeX, policeY, humanX, humanY);
                 if (this.intersect(policeX, policeY, humanX, humanY, road)) {
-                    return new ActionClear(blockade);
-                }
-                if (this.intersect(policeX, policeY, humanX, humanY, blockade)) {
-                    return new ActionClear(blockade);
+                    Action action = this.getIntersectEdgeAction(policeX, policeY, humanX, humanY, road);
+                    if (action == null) continue;
+                    if (action.getClass() == ActionClear.class) {
+                        if (actionClear == null) {
+                            actionClear = (ActionClear) action;
+                            continue;
+                        }
+                        if (actionClear.getTarget() != null) {
+                            Blockade another = (Blockade) this.worldInfo.getEntity(actionClear.getTarget());
+                            if (another != null && this.intersect(blockade, another)) {
+                                return new ActionClear(another);
+                            }
+                            int anotherDistance = this.worldInfo.getDistance(police, another);
+                            int blockadeDistance = this.worldInfo.getDistance(police, blockade);
+                            if (anotherDistance > blockadeDistance) {
+                                return action;
+                            }
+                        }
+                        return actionClear;
+                    } else if (action.getClass() == ActionMove.class && distance < minDistance) {
+                        minDistance = distance;
+                        moveAction = action;
+                    }
+                } else if (this.intersect(policeX, policeY, humanX, humanY, blockade)) {
+                    Vector2D vector = this.scaleClear(this.getVector(policeX, policeY, humanX, humanY));
+                    int clearX = (int) (policeX + vector.getX());
+                    int clearY = (int) (policeY + vector.getY());
+                    vector = this.scaleBackClear(vector);
+                    int startX = (int) (policeX + vector.getX());
+                    int startY = (int) (policeY + vector.getY());
+                    if (this.intersect(startX, startY, clearX, clearY, blockade)) {
+                        if (actionClear == null) {
+                            actionClear = new ActionClear(clearX, clearY, blockade);
+                        } else {
+                            if (actionClear.getTarget() != null) {
+                                Blockade another = (Blockade) this.worldInfo.getEntity(actionClear.getTarget());
+                                if (another != null && this.intersect(blockade, another)) {
+                                    return new ActionClear(another);
+                                }
+                                int distance1 = this.worldInfo.getDistance(police, another);
+                                int distance2 = this.worldInfo.getDistance(police, blockade);
+                                if (distance1 > distance2) {
+                                    return new ActionClear(clearX, clearY, blockade);
+                                }
+                            }
+                            return actionClear;
+                        }
+                    } else if (distance < minDistance) {
+                        minDistance = distance;
+                        moveAction = new ActionMove(Lists.newArrayList(road.getID()), (int) humanX, (int) humanY);
+                    }
                 }
             }
+            if (actionClear != null) return actionClear;
         }
-        return null;
+        return moveAction;
     }
 
     private Action getAreaClearAction(PoliceForce police, StandardEntity targetEntity) {
         if (targetEntity instanceof Building) return null;
-
+        
         Road road = (Road) targetEntity;
         if (!road.isBlockadesDefined() || road.getBlockades().isEmpty()) return null;
-
-        List<Blockade> blockades = this.worldInfo.getBlockades(road)
-                .stream().filter(Blockade::isApexesDefined).collect(Collectors.toList());
-        if (blockades.isEmpty()) return null;
-
-        double agentX = police.getX();
-        double agentY = police.getY();
-
-        Blockade closest = null;
-        double minDist = Double.MAX_VALUE;
-        for (Blockade b : blockades) {
-            double d = getDistance(agentX, agentY, b.getX(), b.getY());
-            if (d < minDist) {
-                minDist = d;
-                closest = b;
+        
+        Collection<Blockade> blockades = this.worldInfo.getBlockades(road)
+            .stream().filter(Blockade::isApexesDefined).collect(Collectors.toSet());
+        
+        int minDistance = Integer.MAX_VALUE;
+        Blockade clearBlockade = null;
+        
+        for (Blockade blockade : blockades) {
+            for (Blockade another : blockades) {
+                if (!blockade.getID().equals(another.getID()) && this.intersect(blockade, another)) {
+                    int distance1 = this.worldInfo.getDistance(police, blockade);
+                    int distance2 = this.worldInfo.getDistance(police, another);
+                    if (distance1 <= distance2 && distance1 < minDistance) {
+                        minDistance = distance1;
+                        clearBlockade = blockade;
+                    } else if (distance2 < minDistance) {
+                        minDistance = distance2;
+                        clearBlockade = another;
+                    }
+                }
             }
         }
-
-        if (closest != null) {
-            return new ActionClear(closest);
+        
+        if (clearBlockade != null) {
+            if (minDistance < this.clearDistance) {
+                return new ActionClear(clearBlockade);
+            } else {
+                return new ActionMove(Lists.newArrayList(police.getPosition()), clearBlockade.getX(), clearBlockade.getY());
+            }
+        }
+        
+        double agentX = police.getX();
+        double agentY = police.getY();
+        clearBlockade = null;
+        Double minPointDistance = Double.MAX_VALUE;
+        int clearX = 0, clearY = 0;
+        
+        for (Blockade blockade : blockades) {
+            int[] apexes = blockade.getApexes();
+            for (int i = 0; i < (apexes.length - 2); i += 2) {
+                double distance = this.getDistance(agentX, agentY, apexes[i], apexes[i + 1]);
+                if (distance < minPointDistance) {
+                    clearBlockade = blockade;
+                    minPointDistance = distance;
+                    clearX = apexes[i];
+                    clearY = apexes[i + 1];
+                }
+            }
+        }
+        
+        if (clearBlockade != null) {
+            if (minPointDistance < this.clearDistance) {
+                Vector2D vector = this.scaleClear(this.getVector(agentX, agentY, clearX, clearY));
+                clearX = (int) (agentX + vector.getX());
+                clearY = (int) (agentY + vector.getY());
+                return new ActionClear(clearX, clearY, clearBlockade);
+            }
+            return new ActionMove(Lists.newArrayList(police.getPosition()), clearX, clearY);
         }
         return null;
     }
@@ -322,50 +350,171 @@ public class ActionExtClear extends adf.core.component.extaction.ExtAction {
         double agentX = police.getX();
         double agentY = police.getY();
         StandardEntity position = Objects.requireNonNull(this.worldInfo.getPosition(police));
-
+        Edge edge = target.getEdgeTo(position.getID());
+        if (edge == null) return null;
+        
         if (position instanceof Road) {
             Road road = (Road) position;
-            if (road.isBlockadesDefined() && !road.getBlockades().isEmpty()) {
-                Blockade nearest = null;
-                double nearestDist = Double.MAX_VALUE;
-                for (Blockade b : this.worldInfo.getBlockades(road)) {
-                    if (!b.isApexesDefined()) continue;
-                    double d = getDistance(agentX, agentY, b.getX(), b.getY());
-                    if (d < nearestDist) {
-                        nearestDist = d;
-                        nearest = b;
+            if (road.isBlockadesDefined() && road.getBlockades().size() > 0) {
+                double midX = (edge.getStartX() + edge.getEndX()) / 2;
+                double midY = (edge.getStartY() + edge.getEndY()) / 2;
+                if (this.intersect(agentX, agentY, midX, midY, road)) {
+                    return this.getIntersectEdgeAction(agentX, agentY, edge, road);
+                }
+                ActionClear actionClear = null;
+                ActionMove actionMove = null;
+                Vector2D vector = this.scaleClear(this.getVector(agentX, agentY, midX, midY));
+                int clearX = (int) (agentX + vector.getX());
+                int clearY = (int) (agentY + vector.getY());
+                vector = this.scaleBackClear(vector);
+                int startX = (int) (agentX + vector.getX());
+                int startY = (int) (agentY + vector.getY());
+                
+                for (Blockade blockade : this.worldInfo.getBlockades(road)) {
+                    if (blockade == null || !blockade.isApexesDefined()) continue;
+                    if (this.intersect(startX, startY, midX, midY, blockade)) {
+                        if (this.intersect(startX, startY, clearX, clearY, blockade)) {
+                            if (actionClear == null) {
+                                actionClear = new ActionClear(clearX, clearY, blockade);
+                                if (this.equalsPoint(this.oldClearX, this.oldClearY, clearX, clearY)) {
+                                    if (this.count >= this.forcedMove) {
+                                        this.count = 0;
+                                        return new ActionMove(Lists.newArrayList(road.getID()), clearX, clearY);
+                                    }
+                                    this.count++;
+                                }
+                                this.oldClearX = clearX;
+                                this.oldClearY = clearY;
+                            } else {
+                                if (actionClear.getTarget() != null) {
+                                    Blockade another = (Blockade) this.worldInfo.getEntity(actionClear.getTarget());
+                                    if (another != null && this.intersect(blockade, another)) {
+                                        return new ActionClear(another);
+                                    }
+                                }
+                                return actionClear;
+                            }
+                        } else if (actionMove == null) {
+                            actionMove = new ActionMove(Lists.newArrayList(road.getID()), (int) midX, (int) midY);
+                        }
                     }
                 }
-                if (nearest != null) {
-                    return new ActionClear(nearest);
-                }
+                if (actionClear != null) return actionClear;
+                if (actionMove != null) return actionMove;
             }
         }
-
+        
         if (target instanceof Road) {
             Road road = (Road) target;
-            if (road.isBlockadesDefined() && !road.getBlockades().isEmpty()) {
-                Blockade nearest = null;
-                double nearestDist = Double.MAX_VALUE;
-                for (Blockade b : this.worldInfo.getBlockades(road)) {
-                    if (!b.isApexesDefined()) continue;
-                    double d = getDistance(agentX, agentY, b.getX(), b.getY());
-                    if (d < nearestDist) {
-                        nearestDist = d;
-                        nearest = b;
+            if (!road.isBlockadesDefined() || road.getBlockades().isEmpty()) {
+                return new ActionMove(Lists.newArrayList(position.getID(), target.getID()));
+            }
+            Blockade clearBlockade = null;
+            Double minPointDistance = Double.MAX_VALUE;
+            int clearX = 0, clearY = 0;
+            
+            for (EntityID id : road.getBlockades()) {
+                Blockade blockade = (Blockade) this.worldInfo.getEntity(id);
+                if (blockade != null && blockade.isApexesDefined()) {
+                    int[] apexes = blockade.getApexes();
+                    for (int i = 0; i < (apexes.length - 2); i += 2) {
+                        double distance = this.getDistance(agentX, agentY, apexes[i], apexes[i + 1]);
+                        if (distance < minPointDistance) {
+                            clearBlockade = blockade;
+                            minPointDistance = distance;
+                            clearX = apexes[i];
+                            clearY = apexes[i + 1];
+                        }
                     }
                 }
-                if (nearest != null) {
-                    return new ActionClear(nearest);
-                }
             }
-            return new ActionMove(Lists.newArrayList(position.getID(), target.getID()));
+            
+            if (clearBlockade != null && minPointDistance < this.clearDistance) {
+                Vector2D vector = this.scaleClear(this.getVector(agentX, agentY, clearX, clearY));
+                clearX = (int) (agentX + vector.getX());
+                clearY = (int) (agentY + vector.getY());
+                if (this.equalsPoint(this.oldClearX, this.oldClearY, clearX, clearY)) {
+                    if (this.count >= this.forcedMove) {
+                        this.count = 0;
+                        return new ActionMove(Lists.newArrayList(road.getID()), clearX, clearY);
+                    }
+                    this.count++;
+                }
+                this.oldClearX = clearX;
+                this.oldClearY = clearY;
+                return new ActionClear(clearX, clearY, clearBlockade);
+            }
         }
-
         return new ActionMove(Lists.newArrayList(position.getID(), target.getID()));
     }
 
-    // ── 几何工具方法保持不变 ──
+    private Action getIntersectEdgeAction(double agentX, double agentY, Edge edge, Road road) {
+        double midX = (edge.getStartX() + edge.getEndX()) / 2;
+        double midY = (edge.getStartY() + edge.getEndY()) / 2;
+        return this.getIntersectEdgeAction(agentX, agentY, midX, midY, road);
+    }
+
+    private Action getIntersectEdgeAction(double agentX, double agentY, double pointX, double pointY, Road road) {
+        Set<Point2D> movePoints = this.getMovePoints(road);
+        Point2D bestPoint = null;
+        double bastDistance = Double.MAX_VALUE;
+        
+        for (Point2D p : movePoints) {
+            if (!this.intersect(agentX, agentY, p.getX(), p.getY(), road)) {
+                if (!this.intersect(pointX, pointY, p.getX(), p.getY(), road)) {
+                    double distance = this.getDistance(pointX, pointY, p.getX(), p.getY());
+                    if (distance < bastDistance) {
+                        bestPoint = p;
+                        bastDistance = distance;
+                    }
+                }
+            }
+        }
+        
+        if (bestPoint != null) {
+            double pX = bestPoint.getX();
+            double pY = bestPoint.getY();
+            if (!road.isBlockadesDefined()) {
+                return new ActionMove(Lists.newArrayList(road.getID()), (int) pX, (int) pY);
+            }
+            ActionClear actionClear = null;
+            ActionMove actionMove = null;
+            Vector2D vector = this.scaleClear(this.getVector(agentX, agentY, pX, pY));
+            int clearX = (int) (agentX + vector.getX());
+            int clearY = (int) (agentY + vector.getY());
+            vector = this.scaleBackClear(vector);
+            int startX = (int) (agentX + vector.getX());
+            int startY = (int) (agentY + vector.getY());
+            
+            for (Blockade blockade : this.worldInfo.getBlockades(road)) {
+                if (this.intersect(startX, startY, pX, pY, blockade)) {
+                    if (this.intersect(startX, startY, clearX, clearY, blockade)) {
+                        if (actionClear == null) {
+                            actionClear = new ActionClear(clearX, clearY, blockade);
+                        } else {
+                            if (actionClear.getTarget() != null) {
+                                Blockade another = (Blockade) this.worldInfo.getEntity(actionClear.getTarget());
+                                if (another != null && this.intersect(blockade, another)) {
+                                    return new ActionClear(another);
+                                }
+                            }
+                            return actionClear;
+                        }
+                    } else if (actionMove == null) {
+                        actionMove = new ActionMove(Lists.newArrayList(road.getID()), (int) pX, (int) pY);
+                    }
+                }
+            }
+            if (actionClear != null) return actionClear;
+            if (actionMove != null) return actionMove;
+        }
+        
+        Action action = this.getAreaClearAction((PoliceForce) this.agentInfo.me(), road);
+        if (action == null) {
+            action = new ActionMove(Lists.newArrayList(road.getID()), (int) pointX, (int) pointY);
+        }
+        return action;
+    }
 
     private boolean equalsPoint(double p1X, double p1Y, double p2X, double p2Y) {
         return this.equalsPoint(p1X, p1Y, p2X, p2Y, 1000.0D);
@@ -424,8 +573,8 @@ public class ActionExtClear extends adf.core.component.extaction.ExtAction {
                 }
             }
             for (int j = 0; j < (apexes1.length - 2); j += 2) {
-                if (java.awt.geom.Line2D.linesIntersect(apexes0[apexes0.length - 2], apexes0[apexes0.length - 1],
-                        apexes0[0], apexes0[1], apexes1[j], apexes1[j + 1], apexes1[j + 2], apexes1[j + 3])) {
+                if (java.awt.geom.Line2D.linesIntersect(apexes0[apexes0.length - 2], apexes0[apexes0.length - 1], apexes0[0], apexes0[1],
+                        apexes1[j], apexes1[j + 1], apexes1[j + 2], apexes1[j + 3])) {
                     return true;
                 }
             }
@@ -435,7 +584,7 @@ public class ActionExtClear extends adf.core.component.extaction.ExtAction {
 
     private boolean intersect(double agentX, double agentY, double pointX, double pointY, Blockade blockade) {
         List<Line2D> lines = GeometryTools2D.pointsToLines(
-                GeometryTools2D.vertexArrayToPoints(blockade.getApexes()), true);
+            GeometryTools2D.vertexArrayToPoints(blockade.getApexes()), true);
         for (Line2D line : lines) {
             Point2D start = line.getOrigin();
             Point2D end = line.getEndPoint();
@@ -458,8 +607,7 @@ public class ActionExtClear extends adf.core.component.extaction.ExtAction {
 
     private double getAngle(Vector2D v1, Vector2D v2) {
         double flag = (v1.getX() * v2.getY()) - (v1.getY() * v2.getX());
-        double angle = Math.acos(((v1.getX() * v2.getX()) + (v1.getY() * v2.getY())) /
-                (v1.getLength() * v2.getLength()));
+        double angle = Math.acos(((v1.getX() * v2.getX()) + (v1.getY() * v2.getY())) / (v1.getLength() * v2.getLength()));
         if (flag > 0) return angle;
         if (flag < 0) return -1 * angle;
         return 0.0D;

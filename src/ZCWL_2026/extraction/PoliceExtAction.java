@@ -63,7 +63,7 @@ public class PoliceExtAction extends ExtAction {
                 "PoliceExtAction.PathPlanning",
                 "ZCWL_2026.module.algorithm.PathPlanning");
         this.clearRepairDistance = si.getClearRepairDistance();
-        this.stuckCyclesBeforeClear = 4; // 默认值
+        this.stuckCyclesBeforeClear = 3; // 默认值
     }
 
     @Override

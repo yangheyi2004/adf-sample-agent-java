@@ -46,7 +46,7 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
 
     private static final int REFUGE_SEARCH_DEPTH = 6;
     private int lastLogTime = 0;
-    private static final int LOG_INTERVAL = 20;
+    private static final int LOG_INTERVAL = 30;
 
     private adf.core.component.module.algorithm.Clustering policeClustering;
     private boolean amIBuried;
@@ -160,14 +160,14 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                 if (receiver.equals(this.agentInfo.getID())) {
                     myResponsibleClusters.add(cluster);
                     takenOver++;
-                    System.err.println("[RoadDetector] 警察 " + receiver.getValue() +
-                            " 接管集群 " + cluster + " (原警察 " + owner.getValue() + " 被掩埋)");
+                    //System.err.println("[RoadDetector] 警察 " + receiver.getValue() +
+                           // " 接管集群 " + cluster + " (原警察 " + owner.getValue() + " 被掩埋)");
                 }
             }
         }
         if (takenOver > 0) {
-            System.err.println("[RoadDetector] 警察 " + agentInfo.getID().getValue() +
-                    " 共接管 " + takenOver + " 个集群");
+            //System.err.println("[RoadDetector] 警察 " + agentInfo.getID().getValue() +
+                    //" 共接管 " + takenOver + " 个集群");
         }
     }
 
@@ -225,8 +225,8 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                     if (isGlobalHelping) {
                         isGlobalHelping = false;
                         globalTarget = null;
-                        System.err.println("[RoadDetector] 警察 " + myId.getValue() +
-                                " 本地出现新任务，退出全局帮助模式，回归本地职责");
+                        //System.err.println("[RoadDetector] 警察 " + myId.getValue() +
+                                //" 本地出现新任务，退出全局帮助模式，回归本地职责");
                     }
                     return this;
                 }
@@ -236,8 +236,8 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                 if (targetRoads.isEmpty() && !isGlobalHelping) {
                     isGlobalHelping = true;
                     globalTarget = null;
-                    System.err.println("[RoadDetector] 警察 " + myId.getValue() +
-                            " ⭐ 本地集群任务清空，开启全局帮助模式！");
+                    //System.err.println("[RoadDetector] 警察 " + myId.getValue() +
+                           // " ⭐ 本地集群任务清空，开启全局帮助模式！");
                 }
 
                 // 在全局帮助模式下，选择全局目标
@@ -247,16 +247,16 @@ public class RoadDetector extends adf.core.component.module.complex.RoadDetector
                         this.result = selected;
                         lockedRoads.put(selected, new LockInfo(myId, this.agentInfo.getTime()));
                         globalTarget = selected;
-                        System.err.println("[RoadDetector] 警察 " + myId.getValue() +
-                                " 🌍 全局帮助模式选择目标: 道路 " + selected.getValue() +
-                                " (距离=" + getDistance(positionID, selected) + ")");
+                        //System.err.println("[RoadDetector] 警察 " + myId.getValue() +
+                               // " 🌍 全局帮助模式选择目标: 道路 " + selected.getValue() +
+                               // " (距离=" + getDistance(positionID, selected) + ")");
                         return this;
                     } else {
                         // 整个地图都没有需要清理的道路了，退出帮助模式
                         if (isGlobalHelping) {
                             isGlobalHelping = false;
-                            System.err.println("[RoadDetector] 警察 " + myId.getValue() +
-                                    " 全局帮助模式未找到任何需要清理的道路，退出帮助模式");
+                            //System.err.println("[RoadDetector] 警察 " + myId.getValue() +
+                                    //" 全局帮助模式未找到任何需要清理的道路，退出帮助模式");
                         }
                     }
                 }
