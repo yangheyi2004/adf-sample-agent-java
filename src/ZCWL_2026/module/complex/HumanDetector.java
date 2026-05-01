@@ -22,7 +22,8 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
     private EntityID result;
     private MessageManager msgManager;
     private Set<EntityID> reportedVictims;
-    private Set<EntityID> knownBuriedVictims;      // 消防车：已知被掩埋的单位（包括平民和其他智能体）
+    // 消防车：已知被掩埋的单位（改为 LinkedHashSet 以保持插入顺序）
+    private LinkedHashSet<EntityID> knownBuriedVictims;
     private Set<EntityID> knownUnburiedVictims;    // 救护车：已挖出待装载的伤员（仅平民）
     private StandardEntityURN agentType;
     
@@ -31,31 +32,35 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
     
     // ========== 救护车全量扫描计时 ==========
     private int lastFullScanTime = 0;
-    private static final int FULL_SCAN_INTERVAL = 5; // 每5步全量扫描一次
+    private static final int FULL_SCAN_INTERVAL = 5;
 
     // ========== 救护车：已装载平民缓存 ==========
     private Set<EntityID> loadedVictimsCache;
 
     // ========== 消防车：目标超时放弃相关 ==========
-    private Map<EntityID, Integer> targetStartTime;      // 目标开始分配的时间
-    private Map<EntityID, Integer> targetLastProgress;   // 最后取得进展的时间
-    private Map<EntityID, Integer> targetLastBuriedness; // 上次掩埋度（用于判断进展）
-    private static final int TARGET_TIMEOUT = 60;         // 60步无进展放弃
+    private Map<EntityID, Integer> targetStartTime;
+    private Map<EntityID, Integer> targetLastProgress;
+    private Map<EntityID, Integer> targetLastBuriedness;
+    private static final int TARGET_TIMEOUT = 40;         // 40步无进展放弃
+
+    // ========== 新增：消防车任务冷却相关 ==========
+    private Map<EntityID, Integer> cooldownVictims;      // 进入冷却的目标及其冷却结束时间
+    private static final int COOLDOWN_DURATION = 30;     // 冷却步数
 
     public HumanDetector(AgentInfo ai, WorldInfo wi, ScenarioInfo si,
                          ModuleManager mm, DevelopData dd) {
         super(ai, wi, si, mm, dd);
-        this.knownBuriedVictims = new HashSet<>();
+        this.knownBuriedVictims = new LinkedHashSet<>();  // 改用有序集合
         this.knownUnburiedVictims = new HashSet<>();
         this.reportedVictims = new HashSet<>();
         this.agentType = ai.me().getStandardURN();
         this.lastLogTime = 0;
         this.loadedVictimsCache = new HashSet<>();
 
-        // 初始化超时相关 Map
         this.targetStartTime = new HashMap<>();
         this.targetLastProgress = new HashMap<>();
         this.targetLastBuriedness = new HashMap<>();
+        this.cooldownVictims = new HashMap<>();           // 初始化冷却Map
 
         switch (si.getMode()) {
             case PRECOMPUTATION_PHASE:
@@ -84,8 +89,8 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                     if (c.isHPDefined() && c.getHP() > 0 
                         && c.isBuriednessDefined() && c.getBuriedness() > 0
                         && c.isPositionDefined()) {
-                        if (knownBuriedVictims.add(c.getID())) {
-                            // 新目标，记录开始时间和初始进展
+                        // 如果该目标不在冷却期，才加入
+                        if (!cooldownVictims.containsKey(c.getID()) && knownBuriedVictims.add(c.getID())) {
                             targetStartTime.put(c.getID(), currentTime);
                             targetLastProgress.put(c.getID(), currentTime);
                             targetLastBuriedness.put(c.getID(), c.getBuriedness());
@@ -96,14 +101,13 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                 }
             }
             
-            // ========== 检查当前目标的进展（掩埋度是否减小） ==========
+            // 检查当前目标的进展（掩埋度是否减小）
             if (this.result != null && knownBuriedVictims.contains(this.result)) {
                 Human victim = (Human) this.worldInfo.getEntity(this.result);
                 if (victim != null && victim.isBuriednessDefined()) {
                     int oldBuried = targetLastBuriedness.getOrDefault(this.result, -1);
                     int newBuried = victim.getBuriedness();
                     if (oldBuried > newBuried && newBuried >= 0) {
-                        // 有进展，更新最后进展时间
                         targetLastProgress.put(this.result, currentTime);
                         targetLastBuriedness.put(this.result, newBuried);
                     } else if (oldBuried == -1) {
@@ -113,15 +117,15 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                 }
             }
             
-            // ========== 清理超过60步无进展的目标 ==========
+            // 清理超过60步无进展的目标 -> 进入冷却
             List<EntityID> timeoutVictims = new ArrayList<>();
             for (EntityID vid : knownBuriedVictims) {
                 Integer lastProg = targetLastProgress.get(vid);
                 if (lastProg == null) continue;
                 if (currentTime - lastProg > TARGET_TIMEOUT) {
                     timeoutVictims.add(vid);
-                    System.err.printf("[HumanDetector] 消防车 %d 放弃目标 %d: 超过 %d 步无进展%n",
-                        this.agentInfo.getID().getValue(), vid.getValue(), TARGET_TIMEOUT);
+                    System.err.printf("[HumanDetector] 消防车 %d 放弃目标 %d: 超过 %d 步无进展，进入 %d 步冷却%n",
+                        this.agentInfo.getID().getValue(), vid.getValue(), TARGET_TIMEOUT, COOLDOWN_DURATION);
                 }
             }
             for (EntityID vid : timeoutVictims) {
@@ -129,9 +133,31 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                 targetStartTime.remove(vid);
                 targetLastProgress.remove(vid);
                 targetLastBuriedness.remove(vid);
-                // 如果当前结果正是被放弃的目标，清空结果
+                // 加入冷却池，记录冷却结束时间
+                cooldownVictims.put(vid, currentTime + COOLDOWN_DURATION);
                 if (this.result != null && this.result.equals(vid)) {
                     this.result = null;
+                }
+            }
+
+            // 冷却到期，重新加入已知掩埋列表末尾
+            List<EntityID> readyToRejoin = new ArrayList<>();
+            for (Map.Entry<EntityID, Integer> entry : cooldownVictims.entrySet()) {
+                if (currentTime >= entry.getValue()) {
+                    readyToRejoin.add(entry.getKey());
+                }
+            }
+            for (EntityID vid : readyToRejoin) {
+                cooldownVictims.remove(vid);
+                // 再次检查目标是否仍然有效且掩埋
+                Human h = (Human) this.worldInfo.getEntity(vid);
+                if (h != null && h.isBuriednessDefined() && h.getBuriedness() > 0 && h instanceof Civilian) {
+                    knownBuriedVictims.add(vid);  // 自动加到末尾
+                    targetStartTime.put(vid, currentTime);
+                    targetLastProgress.put(vid, currentTime);
+                    targetLastBuriedness.put(vid, h.getBuriedness());
+                    System.err.println("[HumanDetector] 消防车 " + agentInfo.getID() + 
+                        " 冷却结束，重新加入目标: " + vid);
                 }
             }
         }
@@ -143,7 +169,6 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                 StandardEntity e = worldInfo.getEntity(id);
                 if (e instanceof Civilian) {
                     Civilian c = (Civilian) e;
-                    // 已挖出且受伤的平民加入待装载列表
                     if (c.isHPDefined() && c.getHP() > 0 
                         && c.isBuriednessDefined() && c.getBuriedness() == 0
                         && c.isDamageDefined() && c.getDamage() > 0
@@ -199,7 +224,6 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                                         " 收到救出语音消息，加入待装载列表: " + victimId);
                                 }
                             } else {
-                                // 位置无效，说明已被装载
                                 if (knownUnburiedVictims.remove(victimId)) {
                                     System.err.println("[HumanDetector] 救护车 " + agentInfo.getID() + 
                                         " 平民 " + victimId + " 位置无效，从待装载列表移除");
@@ -208,14 +232,15 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                             }
                         }
                     }
-                    // 同时从消防车的掩埋列表中移除（如果存在）
+                    // 同时从消防车的掩埋列表和冷却列表中移除（如果存在）
                     knownBuriedVictims.remove(victimId);
+                    cooldownVictims.remove(victimId);
                 }
                 
                 // 消防车处理掩埋信息
                 if (this.agentType == FIRE_BRIGADE) {
                     if (mc.isBuriednessDefined() && mc.getBuriedness() > 0) {
-                        if (knownBuriedVictims.add(victimId)) {
+                        if (!cooldownVictims.containsKey(victimId) && knownBuriedVictims.add(victimId)) {
                             targetStartTime.put(victimId, currentTime);
                             targetLastProgress.put(victimId, currentTime);
                             targetLastBuriedness.put(victimId, mc.getBuriedness());
@@ -229,7 +254,7 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
             } else if (msg instanceof MessagePoliceForce) {
                 MessagePoliceForce mpf = (MessagePoliceForce) msg;
                 if (this.agentType == FIRE_BRIGADE && mpf.isBuriednessDefined() && mpf.getBuriedness() > 0) {
-                    if (knownBuriedVictims.add(mpf.getAgentID())) {
+                    if (!cooldownVictims.containsKey(mpf.getAgentID()) && knownBuriedVictims.add(mpf.getAgentID())) {
                         targetStartTime.put(mpf.getAgentID(), currentTime);
                         targetLastProgress.put(mpf.getAgentID(), currentTime);
                         targetLastBuriedness.put(mpf.getAgentID(), 0);
@@ -239,7 +264,7 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
             } else if (msg instanceof MessageAmbulanceTeam) {
                 MessageAmbulanceTeam mat = (MessageAmbulanceTeam) msg;
                 if (this.agentType == FIRE_BRIGADE && mat.isBuriednessDefined() && mat.getBuriedness() > 0) {
-                    if (knownBuriedVictims.add(mat.getAgentID())) {
+                    if (!cooldownVictims.containsKey(mat.getAgentID()) && knownBuriedVictims.add(mat.getAgentID())) {
                         targetStartTime.put(mat.getAgentID(), currentTime);
                         targetLastProgress.put(mat.getAgentID(), currentTime);
                         targetLastBuriedness.put(mat.getAgentID(), 0);
@@ -273,7 +298,6 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
         int currentTimeLog = this.agentInfo.getTime();
         if (currentTimeLog - lastLogTime >= LOG_INTERVAL) {
             lastLogTime = currentTimeLog;
-            // 可选的定期状态日志
         }
         
         return this;
@@ -294,7 +318,7 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
             }
         } else if (this.agentType == FIRE_BRIGADE) {
             if (isBuried) {
-                if (knownBuriedVictims.add(victimId)) {
+                if (!cooldownVictims.containsKey(victimId) && knownBuriedVictims.add(victimId)) {
                     int now = this.agentInfo.getTime();
                     targetStartTime.put(victimId, now);
                     targetLastProgress.put(victimId, now);
@@ -310,7 +334,7 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
     private void processFireBrigadeMessage(MessageFireBrigade mfb) {
         if (this.agentType != FIRE_BRIGADE) return;
         if (mfb.isBuriednessDefined() && mfb.getBuriedness() > 0) {
-            if (knownBuriedVictims.add(mfb.getAgentID())) {
+            if (!cooldownVictims.containsKey(mfb.getAgentID()) && knownBuriedVictims.add(mfb.getAgentID())) {
                 int now = this.agentInfo.getTime();
                 targetStartTime.put(mfb.getAgentID(), now);
                 targetLastProgress.put(mfb.getAgentID(), now);
@@ -333,7 +357,7 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                 Civilian c = (Civilian) e;
                 if (c.isPositionDefined() && c.getPosition().equals(buildingId)) {
                     if (c.isHPDefined() && c.getHP() > 0 && c.isBuriednessDefined() && c.getBuriedness() > 0) {
-                        if (knownBuriedVictims.add(c.getID())) {
+                        if (!cooldownVictims.containsKey(c.getID()) && knownBuriedVictims.add(c.getID())) {
                             int now = this.agentInfo.getTime();
                             targetStartTime.put(c.getID(), now);
                             targetLastProgress.put(c.getID(), now);
@@ -481,39 +505,25 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
             }
             
             if (this.agentType == FIRE_BRIGADE) {
-                // 优先处理已知掩埋目标
+                // 优先处理已知掩埋目标（从有序集合头部选择，即最早加入的）
                 if (!knownBuriedVictims.isEmpty()) {
-                    Set<EntityID> activeVictims = new HashSet<>();
+                    // 迭代器会按加入顺序返回，第一个就是最早加入的
                     for (EntityID vid : knownBuriedVictims) {
                         Human h = (Human) worldInfo.getEntity(vid);
                         if (h != null && h.isBuriednessDefined() && h.getBuriedness() > 0) {
-                            activeVictims.add(vid);
-                        }
-                    }
-                    Set<EntityID> civilians = new HashSet<>();
-                    for (EntityID vid : activeVictims) {
-                        if (worldInfo.getEntity(vid) instanceof Civilian) {
-                            civilians.add(vid);
-                        }
-                    }
-                    EntityID best = !civilians.isEmpty() ? findNearestVictim(civilians) : findNearestVictim(activeVictims);
-                    if (best != null) {
-                        this.result = best;
-                        if (!targetStartTime.containsKey(best)) {
-                            int now = this.agentInfo.getTime();
-                            targetStartTime.put(best, now);
-                            targetLastProgress.put(best, now);
-                            Human h = (Human) worldInfo.getEntity(best);
-                            targetLastBuriedness.put(best, h != null && h.isBuriednessDefined() ? h.getBuriedness() : 0);
-                        }
-                        if (!reportedVictims.contains(best)) {
-                            sendReportMessage((Human) worldInfo.getEntity(best));
-                            reportedVictims.add(best);
-                            // 通知警察开路
-                            if (worldInfo.getEntity(best) instanceof Human) {
-                                Human victim = (Human) worldInfo.getEntity(best);
-                                if (victim.isPositionDefined() && this.msgManager != null) {
-                                    EntityID buildingId = victim.getPosition();
+                            this.result = vid;
+                            if (!targetStartTime.containsKey(vid)) {
+                                int now = this.agentInfo.getTime();
+                                targetStartTime.put(vid, now);
+                                targetLastProgress.put(vid, now);
+                                targetLastBuriedness.put(vid, h.getBuriedness());
+                            }
+                            if (!reportedVictims.contains(vid)) {
+                                sendReportMessage(h);
+                                reportedVictims.add(vid);
+                                // 通知警察开路
+                                if (h.isPositionDefined() && this.msgManager != null) {
+                                    EntityID buildingId = h.getPosition();
                                     if (buildingId != null) {
                                         MessageFireBrigade roadRequest = new MessageFireBrigade(
                                             true, (FireBrigade) this.agentInfo.me(),
@@ -522,8 +532,8 @@ public class HumanDetector extends adf.core.component.module.complex.HumanDetect
                                     }
                                 }
                             }
+                            return this;
                         }
-                        return this;
                     }
                 }
                 
